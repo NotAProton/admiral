@@ -35,7 +35,16 @@ const configSchema = z.object({
 });
 
 export async function loadConfig(configPath: string): Promise<AdmiralConfig> {
-  const raw = await readFile(configPath, "utf8");
+  const rawFromEnv = process.env.SCHEDULE_B64;
+
+  let raw: string;
+  if (rawFromEnv && rawFromEnv.trim().length > 0) {
+    const normalized = rawFromEnv.trim().replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+    raw = Buffer.from(normalized, "base64").toString("utf8");
+  } else {
+    raw = await readFile(configPath, "utf8");
+  }
+
   const parsed = JSON.parse(raw) as unknown;
   return configSchema.parse(parsed);
 }

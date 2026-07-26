@@ -7,6 +7,9 @@ const hbState = document.getElementById("hbState");
 const loginCard = document.getElementById("loginCard");
 const appCard = document.getElementById("appCard");
 const tokenInput = document.getElementById("tokenInput");
+const siteTime = document.getElementById("siteTime");
+const upcomingClass = document.getElementById("upcomingClass");
+const schedulePre = document.getElementById("schedulePre");
 
 async function request(path, options = {}) {
   const res = await fetch(path, {
@@ -46,11 +49,20 @@ function unlockUi() {
 function renderStatus(status) {
   lastStatus = status;
   statusPre.textContent = JSON.stringify(status, null, 2);
+  schedulePre.textContent = JSON.stringify(status.schedule, null, 2);
 
   const age = status.lastHeartbeatAgeSeconds;
   const fresh = status.heartbeatFresh;
   hbState.textContent = age == null ? "Heartbeat: none yet" : `Heartbeat age: ${age}s`;
   hbState.className = `pill ${fresh ? "ok" : "warn"}`;
+
+  siteTime.textContent = `IST time: ${status.currentIstTime}`;
+
+  if (status.upcomingSlot) {
+    upcomingClass.textContent = `Upcoming: ${status.upcomingSlot.className} at ${status.upcomingSlot.startedAt}`;
+  } else {
+    upcomingClass.textContent = "Upcoming: none";
+  }
 }
 
 async function refreshStatus() {

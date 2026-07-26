@@ -58,6 +58,9 @@ export type StatusResponse = {
   standdown: boolean;
   reason: string;
   activeSlot: ActiveSlot | null;
+  upcomingSlot: ActiveSlot | null;
+  currentIstTime: string;
+  schedule: AdmiralConfig;
   participantCount: number;
   participantNames: string[];
   duplicateConfirmed: boolean;

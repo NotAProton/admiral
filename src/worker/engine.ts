@@ -12,7 +12,7 @@ import type {
 import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
 import { sendJoinSuccessEmail } from "./notifications.js";
-import { getActiveSlot } from "./schedule.js";
+import { getActiveSlot, getCurrentIstIso, getUpcomingSlot } from "./schedule.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { nextTransition } from "./stateMachine.js";
 
@@ -27,6 +27,7 @@ export class AdmiralEngine {
   private reason = "Booting";
 
   private activeSlot: ActiveSlot | null = null;
+  private upcomingSlot: ActiveSlot | null = null;
   private participantSnapshot: ParticipantSnapshot = { count: 0, names: [], nameExactMatchCount: 0 };
   private duplicateStreak = 0;
   private lastScrapeAtMs = 0;
@@ -107,6 +108,9 @@ export class AdmiralEngine {
       standdown: this.standdown,
       reason: this.reason,
       activeSlot: this.activeSlot,
+      upcomingSlot: this.upcomingSlot,
+      currentIstTime: getCurrentIstIso(),
+      schedule: this.config,
       participantCount: this.participantSnapshot.count,
       participantNames: this.participantSnapshot.names,
       duplicateConfirmed: this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes,
@@ -135,6 +139,7 @@ export class AdmiralEngine {
       this.heartbeat.pruneOlderThan(this.config.heartbeat.missingThresholdSeconds * 12);
 
       this.activeSlot = getActiveSlot(this.config);
+      this.upcomingSlot = getUpcomingSlot(this.config);
 
       if (this.state === "InRoom") {
         await this.refreshParticipantsIfDue();
