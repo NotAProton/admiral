@@ -31,7 +31,7 @@ app.addHook("onRequest", async (request, reply) => {
 
   const authOk = isAuthenticated(request.headers.cookie, sessionSecret);
   if (!authOk) {
-    reply.code(401).send({ error: "Unauthorized" });
+    return reply.code(401).send({ error: "Unauthorized" });
   }
 });
 
@@ -96,28 +96,60 @@ app.post("/override", async (request, reply) => {
 
 app.get("/events", async (request, reply) => {
   const abortController = new AbortController();
-  request.raw.on("close", () => abortController.abort());
+  const onClientClose = (): void => {
+    abortController.abort();
+  };
+  request.raw.on("close", onClientClose);
 
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/events`, {
-    signal: abortController.signal
-  });
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${internalPort}/internal/events`, {
+      signal: abortController.signal
+    });
+  } catch (error) {
+    request.raw.off("close", onClientClose);
+
+    if (abortController.signal.aborted) {
+      // Client disconnected before upstream SSE connected.
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(502).send({ error: `Unable to connect internal events stream: ${message}` });
+  }
 
   if (!res.ok || !res.body) {
+    request.raw.off("close", onClientClose);
     return reply.code(502).send({ error: "Unable to open internal events stream" });
   }
 
+  reply.hijack();
   reply.raw.setHeader("Content-Type", "text/event-stream");
   reply.raw.setHeader("Cache-Control", "no-cache");
   reply.raw.setHeader("Connection", "keep-alive");
   reply.raw.setHeader("X-Accel-Buffering", "no");
   reply.raw.flushHeaders?.();
 
-  for await (const chunk of res.body as any) {
-    reply.raw.write(chunk);
+  try {
+    for await (const chunk of res.body as any) {
+      if (reply.raw.destroyed || reply.raw.writableEnded) break;
+      reply.raw.write(chunk);
+    }
+  } catch (error) {
+    const isAbort = abortController.signal.aborted;
+    if (!isAbort) {
+      const message = error instanceof Error ? error.message : String(error);
+      request.log.warn({ err: error }, `SSE proxy stream error: ${message}`);
+    }
+  } finally {
+    request.raw.off("close", onClientClose);
+    abortController.abort();
+    if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+      reply.raw.end();
+    }
   }
 
-  reply.raw.end();
-  return reply;
+  return;
 });
 
 await app.listen({ port: publicPort, host: "0.0.0.0" });
