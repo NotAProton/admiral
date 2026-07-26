@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f9f5e8" />
+    <title>Admiral</title>
+    <link rel="manifest" href="/manifest.json" />
+    <style>
+      :root {
+        --bg: #f9f5e8;
+        --card: #fff9ee;
+        --ink: #1d2418;
+        --muted: #5b644f;
+        --ok: #2f8f46;
+        --warn: #c57e13;
+        --danger: #bf2f2f;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 10% 10%, #fffef6 0, transparent 30%),
+          radial-gradient(circle at 90% 20%, #ffeec9 0, transparent 40%),
+          var(--bg);
+        min-height: 100vh;
+        padding: 24px;
+      }
+      .shell {
+        max-width: 920px;
+        margin: 0 auto;
+        display: grid;
+        gap: 16px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid #e8d9bc;
+        border-radius: 16px;
+        padding: 16px;
+        box-shadow: 0 8px 20px rgba(94, 71, 31, 0.08);
+      }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+      h1 { margin: 0; font-size: 28px; letter-spacing: 0.4px; }
+      .muted { color: var(--muted); }
+      .pill {
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid #d4c5a6;
+        background: #fff;
+        font-size: 13px;
+      }
+      .ok { color: var(--ok); }
+      .warn { color: var(--warn); }
+      .danger { color: var(--danger); }
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: #3a5f22;
+        color: #fff;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.secondary { background: #5d6f47; }
+      button.danger { background: #922a2a; }
+      input {
+        border: 1px solid #ccb993;
+        border-radius: 10px;
+        padding: 10px;
+        width: 280px;
+      }
+      pre {
+        background: #fff;
+        border: 1px solid #e8d9bc;
+        border-radius: 12px;
+        padding: 12px;
+        margin: 0;
+        overflow: auto;
+        max-height: 320px;
+      }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card row" style="justify-content: space-between">
+        <div>
+          <h1>Admiral</h1>
+          <div class="muted">Presence handoff controller</div>
+        </div>
+        <div id="hbState" class="pill">Heartbeat: unknown</div>
+      </div>
+
+      <div id="loginCard" class="card">
+        <div class="row">
+          <input id="tokenInput" type="password" placeholder="Access token" />
+          <button id="loginBtn">Unlock</button>
+        </div>
+        <div class="muted" style="margin-top: 8px">Token is exchanged for an HttpOnly session cookie.</div>
+      </div>
+
+      <div id="appCard" class="card hidden">
+        <div class="row" style="margin-bottom: 12px">
+          <button id="joinBtn">Force Join</button>
+          <button id="leaveBtn" class="danger">Force Leave</button>
+          <button id="standdownOnBtn" class="secondary">Standdown On</button>
+          <button id="standdownOffBtn" class="secondary">Standdown Off</button>
+          <button id="openJoinBtn" class="secondary">Join Myself</button>
+        </div>
+        <pre id="statusPre">Loading...</pre>
+      </div>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

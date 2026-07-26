@@ -1,0 +1,31 @@
+{
+  "name": "admiral",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:unit": "node --import tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "poc:resolve": "tsx src/poc/resolveBbbLink.ts",
+    "poc:join": "tsx src/poc/joinBbb.ts",
+    "worker:start": "tsx src/worker/index.ts",
+    "api:start": "tsx src/api/index.ts",
+    "watchdog:once": "tsx scripts/watchdog-notify.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "fastify": "^5.10.0",
+    "playwright": "^1.62.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}

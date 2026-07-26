@@ -1,0 +1,28 @@
+{
+  "timezone": "Asia/Kolkata",
+  "heartbeat": {
+    "intervalSeconds": 15,
+    "freshThresholdSeconds": 20,
+    "missingThresholdSeconds": 60
+  },
+  "duplicateDetection": {
+    "confirmConsecutiveScrapes": 2,
+    "scrapeIntervalSeconds": 10
+  },
+  "courses": [
+    {
+      "courseId": "dsa-lab",
+      "className": "Data Structures Lab",
+      "classPageUrl": "https://lmsug23.iiitkottayam.ac.in/course/view.php?id=168",
+      "joinLinkText": "Join Online Class",
+      "myDisplayName": "2023BCY0048 AKSHAT AJIT SARASWAT",
+      "weeklySlots": [
+        {
+          "days": ["Mon", "Wed"],
+          "start": "09:00",
+          "end": "10:00"
+        }
+      ]
+    }
+  ]
+}

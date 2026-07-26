@@ -1,0 +1,5 @@
+{$ADMIRAL_DOMAIN} {
+  encode gzip
+
+  reverse_proxy worker:8080
+}

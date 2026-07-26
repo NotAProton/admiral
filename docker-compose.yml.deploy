@@ -1,0 +1,48 @@
+services:
+  worker:
+    image: ghcr.io/notaproton/admiral-worker:latest
+    pull_policy: always
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/internal/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  api:
+    image: ghcr.io/notaproton/admiral-api:latest
+    pull_policy: always
+    env_file:
+      - .env
+    depends_on:
+      worker:
+        condition: service_healthy
+    network_mode: service:worker
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - worker
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
