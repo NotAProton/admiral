@@ -73,6 +73,15 @@ test("Joining transitions to InRoom when join completes", () => {
   assert.equal(transition.nextState, "InRoom");
 });
 
+test("Joining resets to Out when join is not completed", () => {
+  const transition = nextTransition(
+    "Joining",
+    baseSignals({ joinCompleted: false })
+  );
+  assert.equal(transition.nextState, "Out");
+  assert.equal(transition.shouldAttemptJoin, false);
+});
+
 test("Leaving transitions to Out when leave completes", () => {
   const transition = nextTransition(
     "Leaving",

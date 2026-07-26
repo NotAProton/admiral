@@ -11,7 +11,11 @@ import type {
 } from "../shared/types.js";
 import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
-import { sendJoinSuccessEmail } from "./notifications.js";
+import {
+  sendJoinFailureEmail,
+  sendJoinSuccessEmail,
+  sendLeaveSuccessEmail
+} from "./notifications.js";
 import { getActiveSlot, getCurrentIstIso, getUpcomingSlot } from "./schedule.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { nextTransition } from "./stateMachine.js";
@@ -32,6 +36,7 @@ export class AdmiralEngine {
   private duplicateStreak = 0;
   private lastScrapeAtMs = 0;
   private bbbJoinUrl: string | null = null;
+  private currentRoomSlot: ActiveSlot | null = null;
 
   private forceJoinPending = false;
   private forceLeavePending = false;
@@ -202,9 +207,15 @@ export class AdmiralEngine {
 
         this.state = follow.nextState;
         if (left) {
+          await sendLeaveSuccessEmail(this.currentRoomSlot).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`Leave-success email failed: ${message}`);
+          });
+
           this.participantSnapshot = { count: 0, names: [], nameExactMatchCount: 0 };
           this.duplicateStreak = 0;
           this.bbbJoinUrl = null;
+          this.currentRoomSlot = null;
           this.reason = "Left room";
         } else {
           this.reason = "Leave failed";
@@ -276,6 +287,7 @@ export class AdmiralEngine {
       });
 
       await this.refreshParticipantsIfDue();
+      this.currentRoomSlot = slot;
 
       await sendJoinSuccessEmail(slot, resolved.joinUrl).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -284,7 +296,14 @@ export class AdmiralEngine {
 
       return true;
     } catch (error) {
-      this.reason = `Join failed: ${error instanceof Error ? error.message : String(error)}`;
+      const message = error instanceof Error ? error.message : String(error);
+      this.reason = `Join failed: ${message}`;
+
+      await sendJoinFailureEmail(slot, message).catch((notifyError) => {
+        const notifyMessage = notifyError instanceof Error ? notifyError.message : String(notifyError);
+        console.warn(`Join-failure email failed: ${notifyMessage}`);
+      });
+
       return false;
     }
   }

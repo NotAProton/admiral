@@ -77,9 +77,9 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
     }
 
     return {
-      nextState: "Joining",
-      reason: "Join in progress",
-      shouldAttemptJoin: true,
+      nextState: "Out",
+      reason: "Join did not complete; resetting",
+      shouldAttemptJoin: false,
       shouldAttemptLeave: false
     };
   }
