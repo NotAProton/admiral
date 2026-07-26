@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.62.0-jammy
+FROM mcr.microsoft.com/playwright:v1.62.0-next-canary-20260709180306-jammy
 
 WORKDIR /app
 
