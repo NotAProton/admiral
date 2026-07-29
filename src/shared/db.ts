@@ -88,6 +88,27 @@ const MIGRATIONS: readonly Migration[] = [
       -- Index events by slot so session summaries can be rendered from history.
       CREATE INDEX idx_events_slot ON events (slot_key);
     `
+  },
+  {
+    version: 3,
+    statements: `
+      -- Handoff re-join grace: after Admiral hands off to the user (duplicate
+      -- detected), it refuses to auto-rejoin the same slot for a grace window.
+      -- This stops the join/leave flap that otherwise happens every ~90s while
+      -- the user is in the BBB app with the PWA backgrounded. Survives restarts.
+      ALTER TABLE worker_state ADD COLUMN handoff_grace_until_ms INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE worker_state ADD COLUMN handoff_grace_slot_key TEXT;
+    `
+  },
+  {
+    version: 4,
+    statements: `
+      -- Tracks the slot key from the previous tick so the engine can detect
+      -- slot transitions and auto-join a new class even if the heartbeat is
+      -- still "fresh" from the previous session (e.g. the user clicked "Join
+      -- Myself" in session 1 and the PWA is still sending heartbeats).
+      ALTER TABLE worker_state ADD COLUMN last_active_slot_key TEXT;
+    `
   }
 ];
 

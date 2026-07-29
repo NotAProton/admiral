@@ -242,6 +242,17 @@ export class NotificationCenter {
     await this.flushDue().catch(() => undefined);
   }
 
+  /**
+   * Cancels pending outbox rows older than ~6h (except session summaries, which
+   * are still valuable after a long outage). Called on boot so a multi-hour
+   * blackout doesn't flush yesterday's morning plan or stale milestone emails
+   * when the worker reconnects.
+   */
+  pruneStaleOutbox(): number {
+    const nowMs = this.now();
+    return this.p.cancelStalePending(6 * 60 * 60 * 1000, nowMs, ["session_summary"]);
+  }
+
   // ── Send pipeline ─────────────────────────────────────────────────────────
 
   private capExceeded(kind: NotificationKind, dedupeKey: string, slotKey: string | null): boolean {
@@ -275,9 +286,14 @@ export class NotificationCenter {
   private async sendGroup(rows: OutboxRow[], nowMs: number): Promise<void> {
     if (rows.length === 0) return;
     const priority = rows.reduce((min, r) => Math.min(min, r.priority), 2);
+    const dedupeKeys = rows.map((r) => r.dedupeKey).filter((k): k is string => k != null);
 
     if (!resendConfigured()) {
       for (const r of rows) this.p.setOutboxStatus(r.id, "suppressed");
+      // Consume dedupe keys so daily/scheduled emails don't re-enqueue every
+      // tick while RESEND is unconfigured/revoked (otherwise ~250
+      // email_suppressed events/hour pile up).
+      for (const k of dedupeKeys) this.p.recordDedupe(k, nowMs);
       this.p.appendEvent({
         kind: "email_suppressed",
         payload: { emailKind: rows[0].kind, reason: "RESEND_* env vars missing" }
@@ -288,11 +304,14 @@ export class NotificationCenter {
     const budget = this.checkBudget(priority, nowMs);
     if (!budget.allowed) {
       for (const r of rows) this.p.setOutboxStatus(r.id, "suppressed");
+      // Same reason: without consuming keys, budget-suppressed daily emails
+      // would loop forever once the budget is exhausted.
+      for (const k of dedupeKeys) this.p.recordDedupe(k, nowMs);
       this.p.appendEvent({
         kind: "email_suppressed",
         payload: {
           emailKind: rows[0].kind,
-          dedupeKeys: rows.map((r) => r.dedupeKey),
+          dedupeKeys,
           reason: budget.reason
         }
       });
@@ -302,7 +321,6 @@ export class NotificationCenter {
     const coalesced =
       rows.length > 1 && rows.every((r) => COALESCE_KINDS.has(r.kind as NotificationKind));
     const body = coalesced ? this.renderCombined(rows, nowMs) : this.renderOne(rows[0], nowMs);
-    const dedupeKeys = rows.map((r) => r.dedupeKey).filter((k): k is string => k != null);
     const logKind = coalesced ? "session_update" : rows[0].kind;
     const lines = [...body.lines, "", statusBlock(this.statusProvider(), nowMs), footer()];
 
@@ -400,7 +418,7 @@ export class NotificationCenter {
     const className = slot?.className ?? "session";
     const lines: string[] = ["Admiral session update (multiple events coalesced):", ""];
     for (const row of rows) lines.push(milestoneLine(row));
-    return { subject: `↔ Admiral session update — ${className}`, lines };
+    return { subject: `Admiral session update — ${className}`, lines };
   }
 }
 
@@ -426,7 +444,8 @@ async function defaultResendSend(payload: {
       Authorization: `Bearer ${process.env.RESEND_API_KEY ?? ""}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10_000)
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "<no-body>");
@@ -536,20 +555,20 @@ function renderCoverStart(slot: ActiveSlot | null, joinUrl: unknown, nowMs: numb
     lines.push("", `Join URL: ${joinUrl}`);
   }
   lines.push("", "Admiral leaves automatically when the slot ends or when it detects you joined.");
-  return { subject: `✓ Admiral in room — ${slot?.className ?? "class"}`, lines };
+  return { subject: `Admiral in room — ${slot?.className ?? "class"}`, lines };
 }
 
 function renderCoverResume(slot: ActiveSlot | null, nowMs: number) {
   const lines = ["You dropped — Admiral is back in the room covering for you.", ""];
   if (slot) lines.push(...slotLines(slot, nowMs));
   lines.push("", "Rejoin when you can; Admiral will hand off automatically.");
-  return { subject: `↩ Covering again — ${slot?.className ?? "class"}`, lines };
+  return { subject: `Covering again — ${slot?.className ?? "class"}`, lines };
 }
 
 function renderHandoff(slot: ActiveSlot | null, nowMs: number) {
   const lines = ["Admiral detected you in the room and has left. You have control.", ""];
   if (slot) lines.push(...slotLines(slot, nowMs));
-  return { subject: `✓ You're in — Admiral left (${slot?.className ?? "class"})`, lines };
+  return { subject: `You're in — Admiral left (${slot?.className ?? "class"})`, lines };
 }
 
 function renderActionNeeded(slot: ActiveSlot | null, payload: Record<string, unknown>, nowMs: number) {
@@ -575,7 +594,7 @@ function renderActionNeeded(slot: ActiveSlot | null, payload: Record<string, unk
     );
   }
   lines.push('Tap "Force Join" in the dashboard to retry immediately, or join yourself via the class page.');
-  return { subject: `🔴 ACTION: Admiral can't join — ${slot?.className ?? "class"}`, lines };
+  return { subject: `ACTION: Admiral can't join — ${slot?.className ?? "class"}`, lines };
 }
 
 function renderSessionSummary(
@@ -584,14 +603,14 @@ function renderSessionSummary(
   nowMs: number
 ) {
   if (!slot) {
-    return { subject: "📝 Admiral class summary", lines: ["Session summary (slot details unavailable)."] };
+    return { subject: "Admiral class summary", lines: ["Session summary (slot details unavailable)."] };
   }
   const slotKey = `${slot.courseId}@${slot.startedAt}`;
   const events = p.listEventsForSlot(slotKey, 500);
   const className = slot.className;
   if (events.length === 0) {
     return {
-      subject: `📝 Class summary — ${className}`,
+      subject: `Class summary — ${className}`,
       lines: [
         "All quiet — you attended the whole session; Admiral never needed to join.",
         "",
@@ -626,7 +645,7 @@ function renderSessionSummary(
     `  joins: ${joins}  •  handoffs: ${handoffs}  •  join failures: ${failures}`,
     `  backoff alerts: ${alerts}  •  updates suppressed: ${suppressed}`
   ];
-  return { subject: `📝 Class summary — ${className}`, lines };
+  return { subject: `Class summary — ${className}`, lines };
 }
 
 function countByTrigger(events: HistoryEvent[], needle: string): number {
@@ -678,7 +697,7 @@ function renderSessionStanddown(slot: ActiveSlot | null, cancelled: boolean) {
   if (cancelled) {
     const lines = ["Per-session stand-down cancelled — Admiral will auto-join this session normally.", ""];
     if (slot) lines.push(slotBrief(slot));
-    return { subject: `↩ Stand-down cancelled — ${slot?.className ?? "session"}`, lines };
+    return { subject: `Stand-down cancelled — ${slot?.className ?? "session"}`, lines };
   }
   const lines = ["Admiral will sit out this session. Auto-join resumes from the next class onwards.", ""];
   if (slot) lines.push(slotBrief(slot));
@@ -723,7 +742,7 @@ function renderMorningPlan(status: StatusResponse, nowMs: number) {
       `Next class: ${status.upcomingSlot.className} at ${shortIstTime(status.upcomingSlot.startedAt)}${inMin > 0 ? ` (in ~${inMin} min)` : ""}`
     );
   }
-  return { subject: `☕ Admiral morning plan — ${date}`, lines };
+  return { subject: `Admiral morning plan — ${date}`, lines };
 }
 
 function renderDailyWrapup(status: StatusResponse, nowMs: number) {
@@ -743,7 +762,7 @@ function renderDailyWrapup(status: StatusResponse, nowMs: number) {
   if (status.upcomingSlot) {
     lines.push("", `Next class: ${status.upcomingSlot.className} at ${shortIstTime(status.upcomingSlot.startedAt)}`);
   }
-  return { subject: `🧾 Admiral daily wrap-up — ${date}`, lines };
+  return { subject: `Admiral daily wrap-up — ${date}`, lines };
 }
 
 function statusBlock(status: StatusResponse, nowMs: number): string {

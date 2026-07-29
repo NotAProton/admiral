@@ -8,6 +8,9 @@ export type PersistedWorkerState = {
   joinBackoffUntilMs: number;
   lastFailedSlotKey: string | null;
   currentRoomSlot: ActiveSlot | null;
+  handoffGraceUntilMs: number;
+  handoffGraceSlotKey: string | null;
+  lastActiveSlotKey: string | null;
 };
 
 export type DeviceHeartbeatRow = {
@@ -34,6 +37,9 @@ type WorkerStateRow = {
   join_backoff_until_ms: number;
   last_failed_slot_key: string | null;
   current_room_json: string | null;
+  handoff_grace_until_ms?: number;
+  handoff_grace_slot_key?: string | null;
+  last_active_slot_key?: string | null;
 };
 
 type EventRow = {
@@ -130,7 +136,8 @@ export class WorkerPersistence {
     const row = this.db
       .prepare(
         `SELECT standdown, session_standdown_json, join_failure_streak,
-                join_backoff_until_ms, last_failed_slot_key, current_room_json
+                join_backoff_until_ms, last_failed_slot_key, current_room_json,
+                handoff_grace_until_ms, handoff_grace_slot_key, last_active_slot_key
          FROM worker_state WHERE id = 1`
       )
       .get() as unknown as WorkerStateRow | undefined;
@@ -142,7 +149,10 @@ export class WorkerPersistence {
         joinFailureStreak: 0,
         joinBackoffUntilMs: 0,
         lastFailedSlotKey: null,
-        currentRoomSlot: null
+        currentRoomSlot: null,
+        handoffGraceUntilMs: 0,
+        handoffGraceSlotKey: null,
+        lastActiveSlotKey: null
       };
     }
 
@@ -152,7 +162,10 @@ export class WorkerPersistence {
       joinFailureStreak: row.join_failure_streak,
       joinBackoffUntilMs: row.join_backoff_until_ms,
       lastFailedSlotKey: row.last_failed_slot_key,
-      currentRoomSlot: parseSlotJson(row.current_room_json)
+      currentRoomSlot: parseSlotJson(row.current_room_json),
+      handoffGraceUntilMs: row.handoff_grace_until_ms ?? 0,
+      handoffGraceSlotKey: row.handoff_grace_slot_key ?? null,
+      lastActiveSlotKey: row.last_active_slot_key ?? null
     };
   }
 
@@ -161,7 +174,8 @@ export class WorkerPersistence {
       .prepare(
         `UPDATE worker_state
          SET standdown = ?, session_standdown_json = ?, join_failure_streak = ?,
-             join_backoff_until_ms = ?, last_failed_slot_key = ?, current_room_json = ?
+             join_backoff_until_ms = ?, last_failed_slot_key = ?, current_room_json = ?,
+             handoff_grace_until_ms = ?, handoff_grace_slot_key = ?, last_active_slot_key = ?
          WHERE id = 1`
       )
       .run(
@@ -170,7 +184,10 @@ export class WorkerPersistence {
         state.joinFailureStreak,
         state.joinBackoffUntilMs,
         state.lastFailedSlotKey,
-        state.currentRoomSlot ? JSON.stringify(state.currentRoomSlot) : null
+        state.currentRoomSlot ? JSON.stringify(state.currentRoomSlot) : null,
+        state.handoffGraceUntilMs,
+        state.handoffGraceSlotKey,
+        state.lastActiveSlotKey
       );
   }
 
@@ -387,6 +404,28 @@ export class WorkerPersistence {
     const info = this.db
       .prepare(`UPDATE email_outbox SET status = 'cancelled' WHERE kind = ? AND status = 'pending'`)
       .run(kind);
+    return Number(info.changes);
+  }
+
+  /** Cancels pending rows older than maxAgeMs, except the given kinds. */
+  cancelStalePending(maxAgeMs: number, nowMs: number, excludeKinds: string[]): number {
+    const cutoff = nowMs - maxAgeMs;
+    if (excludeKinds.length === 0) {
+      const info = this.db
+        .prepare(
+          `UPDATE email_outbox SET status = 'cancelled'
+           WHERE status = 'pending' AND created_ms < ?`
+        )
+        .run(cutoff);
+      return Number(info.changes);
+    }
+    const placeholders = excludeKinds.map(() => "?").join(", ");
+    const info = this.db
+      .prepare(
+        `UPDATE email_outbox SET status = 'cancelled'
+         WHERE status = 'pending' AND created_ms < ? AND kind NOT IN (${placeholders})`
+      )
+      .run(cutoff, ...excludeKinds);
     return Number(info.changes);
   }
 

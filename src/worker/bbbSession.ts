@@ -41,6 +41,21 @@ export class BbbSession {
     });
 
     this.page = await this.context.newPage();
+
+    try {
+      await this.doJoinFlow(input);
+    } catch (error) {
+      // A failed join must not leave a zombie browser holding memory/CPU until
+      // the next join attempt. Close everything, then rethrow so the engine
+      // records the failure and applies its backoff.
+      await this.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async doJoinFlow(input: JoinInput): Promise<void> {
+    if (!this.page) throw new Error("Browser page not initialized");
+
     await this.page.goto(input.joinUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
     if (this.page.url().includes("/login/index.php") && input.moodleUsername && input.moodlePassword) {

@@ -57,7 +57,10 @@ function saveState(state: WatchdogState): void {
 
 async function healthOk(): Promise<boolean> {
   try {
-    const res = await fetch(healthUrl, { method: "GET" });
+    const res = await fetch(healthUrl, {
+      method: "GET",
+      signal: AbortSignal.timeout(10_000)
+    });
     return res.ok;
   } catch {
     return false;
@@ -83,7 +86,8 @@ async function sendAlert(message: string): Promise<void> {
       "Authorization": `Bearer ${resendKey}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10_000)
   });
 
   if (!res.ok) {

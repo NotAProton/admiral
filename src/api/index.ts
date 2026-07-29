@@ -125,19 +125,35 @@ app.post("/logout", async (_request, reply) => {
   return { ok: true };
 });
 
-app.get("/health", async () => {
-  return { ok: true, service: "api", ts: new Date().toISOString() };
+app.get("/health", async (request, reply) => {
+  // Proxy the worker's liveness check: this is the endpoint the watchdog and
+  // any external monitor should hit. It returns 503 if the worker is alive but
+  // the engine has stopped ticking (e.g. a hung tick), which Docker's
+  // healthcheck / autoheal can use to restart a wedged container.
+  try {
+    const res = await fetch(`http://127.0.0.1:${internalPort}/internal/health`, {
+      signal: AbortSignal.timeout(5_000)
+    });
+    const body = await res.json().catch(() => ({ ok: false, service: "worker", ts: new Date().toISOString() }));
+    return reply.code(res.status).send(body);
+  } catch {
+    return reply.code(503).send({ ok: false, service: "worker", error: "worker unreachable", ts: new Date().toISOString() });
+  }
 });
 
 app.get("/status", async () => {
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/status`);
+  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/status`, {
+    signal: AbortSignal.timeout(5_000)
+  });
   return res.json();
 });
 
 app.get("/history", async (request) => {
   const queryIndex = request.url.indexOf("?");
   const query = queryIndex >= 0 ? request.url.slice(queryIndex) : "";
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/history${query}`);
+  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/history${query}`, {
+    signal: AbortSignal.timeout(5_000)
+  });
   return res.json();
 });
 
@@ -146,7 +162,8 @@ app.post("/heartbeat", async (request, reply) => {
   const res = await fetch(`http://127.0.0.1:${internalPort}/internal/heartbeat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000)
   });
 
   if (!res.ok) {
@@ -161,7 +178,8 @@ app.post("/override", async (request, reply) => {
   const res = await fetch(`http://127.0.0.1:${internalPort}/internal/override`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000)
   });
 
   if (!res.ok) {

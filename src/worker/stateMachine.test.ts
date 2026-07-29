@@ -15,6 +15,8 @@ function baseSignals(overrides: Partial<TickSignals> = {}): TickSignals {
     joinCompleted: false,
     leaveCompleted: false,
     joinBackoffActive: false,
+    joinGraceActive: false,
+    newSlotStarted: false,
     ...overrides
   };
 }
@@ -149,4 +151,69 @@ test("InRoom leaves when its slot is stood down via session standdown", () => {
   assert.equal(transition.nextState, "Leaving");
   assert.equal(transition.shouldAttemptLeave, true);
   assert.equal(transition.reason, "Session stood down");
+});
+
+test("Out holds off joining during handoff re-join grace", () => {
+  const transition = nextTransition(
+    "Out",
+    baseSignals({ joinGraceActive: true })
+  );
+  assert.equal(transition.nextState, "Out");
+  assert.equal(transition.shouldAttemptJoin, false);
+  assert.equal(transition.reason, "Holding off after handoff (user likely present)");
+});
+
+test("Force join bypasses handoff re-join grace", () => {
+  const transition = nextTransition(
+    "Out",
+    baseSignals({ joinGraceActive: true, forceJoin: true })
+  );
+  assert.equal(transition.nextState, "Joining");
+  assert.equal(transition.shouldAttemptJoin, true);
+});
+
+test("Out auto-joins a new slot even when heartbeat is fresh", () => {
+  // Scenario: the user clicked "Join Myself" in session 1 and the PWA kept
+  // sending heartbeats. When session 2 starts, Admiral should auto-join
+  // regardless. The engine overrides heartbeatFresh to false when
+  // newSlotStarted is true, so this test simulates the engine's signal.
+  const transition = nextTransition(
+    "Out",
+    baseSignals({
+      newSlotStarted: true,
+      heartbeatFresh: false, // engine overrides this when newSlotStarted
+      heartbeatMissing: false // heartbeat is present, just stale for the new slot
+    })
+  );
+  assert.equal(transition.nextState, "Joining");
+  assert.equal(transition.shouldAttemptJoin, true);
+  assert.equal(transition.reason, "New slot started; auto-joining");
+});
+
+test("Out holds off on new slot when session standdown is active", () => {
+  const transition = nextTransition(
+    "Out",
+    baseSignals({
+      newSlotStarted: true,
+      heartbeatFresh: false,
+      sessionSuppressed: true
+    })
+  );
+  assert.equal(transition.nextState, "Out");
+  assert.equal(transition.shouldAttemptJoin, false);
+  assert.equal(transition.reason, "Session stood down");
+});
+
+test("Out holds off on new slot when global standdown is active", () => {
+  const transition = nextTransition(
+    "Out",
+    baseSignals({
+      newSlotStarted: true,
+      heartbeatFresh: false,
+      standdown: true
+    })
+  );
+  assert.equal(transition.nextState, "Out");
+  assert.equal(transition.shouldAttemptJoin, false);
+  assert.equal(transition.reason, "Standdown enabled");
 });

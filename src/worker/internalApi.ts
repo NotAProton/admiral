@@ -24,8 +24,20 @@ function writeSse(reply: FastifyReply, event: string, payload: StatusResponse): 
 export async function startInternalApi(engine: AdmiralEngine, port: number): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
 
-  app.get("/internal/health", async () => {
-    return { ok: true, service: "worker", ts: new Date().toISOString() };
+  app.get("/internal/health", async (request, reply) => {
+    const alive = engine.isAlive();
+    const body = {
+      ok: alive,
+      service: "worker",
+      alive,
+      lastTickMs: engine.getLastTickMs(),
+      lastTickAgeSeconds: Math.round((Date.now() - engine.getLastTickMs()) / 1000),
+      ts: new Date().toISOString()
+    };
+    if (!alive) {
+      return reply.code(503).send(body);
+    }
+    return body;
   });
 
   app.get("/internal/status", async () => {

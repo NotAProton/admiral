@@ -41,7 +41,10 @@ test("worker state round-trips through save and load", () => {
     joinFailureStreak: 2,
     joinBackoffUntilMs: 1_800_000_000_000,
     lastFailedSlotKey: "dsa-lab@2026-07-29T09:00:00+05:30",
-    currentRoomSlot: slot
+    currentRoomSlot: slot,
+    handoffGraceUntilMs: 1_800_000_000_500,
+    handoffGraceSlotKey: "dsa-lab@2026-07-29T09:00:00+05:30",
+    lastActiveSlotKey: "dsa-lab@2026-07-29T09:00:00+05:30"
   });
 
   const state = p.loadWorkerState();
@@ -51,6 +54,9 @@ test("worker state round-trips through save and load", () => {
   assert.equal(state.joinBackoffUntilMs, 1_800_000_000_000);
   assert.equal(state.lastFailedSlotKey, "dsa-lab@2026-07-29T09:00:00+05:30");
   assert.deepEqual(state.currentRoomSlot, slot);
+  assert.equal(state.handoffGraceUntilMs, 1_800_000_000_500);
+  assert.equal(state.handoffGraceSlotKey, "dsa-lab@2026-07-29T09:00:00+05:30");
+  assert.equal(state.lastActiveSlotKey, "dsa-lab@2026-07-29T09:00:00+05:30");
 });
 
 test("corrupt persisted slot JSON falls back to null", () => {
@@ -138,7 +144,10 @@ test("state survives close and reopen of a file-backed database", () => {
       joinFailureStreak: 0,
       joinBackoffUntilMs: 0,
       lastFailedSlotKey: null,
-      currentRoomSlot: null
+      currentRoomSlot: null,
+      handoffGraceUntilMs: 0,
+      handoffGraceSlotKey: null,
+      lastActiveSlotKey: null
     });
     first.appendEvent({ kind: "override", payload: { action: "standdown_on" } });
 
@@ -151,7 +160,7 @@ test("state survives close and reopen of a file-backed database", () => {
     // Reopening runs migrations idempotently: schema version stays applied.
     const db = openDatabase(dbPath);
     const row = db.prepare("PRAGMA user_version").get() as unknown as { user_version: number };
-    assert.equal(row.user_version, 2);
+    assert.equal(row.user_version, 4);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

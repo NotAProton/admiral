@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
 import { envBoolean, envNumber, loadConfig } from "../shared/config.js";
+import { readdir, rm, stat } from "node:fs/promises";
 import type {
   ActiveSlot,
   AdmiralConfig,
@@ -38,6 +39,26 @@ export class AdmiralEngine {
   private currentRoomSlot: ActiveSlot | null = null;
   private lastActiveSlotForSummary: ActiveSlot | null = null;
   private center!: NotificationCenter;
+
+  // Handoff re-join grace: after handing off to the user, block auto-rejoin
+  // for this slot until the grace window expires. Stops the 90s flap loop.
+  private handoffGraceUntilMs = 0;
+  private handoffGraceSlotKey: string | null = null;
+  private static readonly HANDOFF_GRACE_MS = envNumber("HANDOFF_GRACE_SECONDS", 240) * 1000;
+
+  // Last active slot key (from the previous tick). When the active slot
+  // changes, Admiral auto-joins the new class regardless of heartbeat status —
+  // the heartbeat may still be "fresh" from the previous session (the user
+  // clicked "Join Myself" and the PWA kept sending heartbeats).
+  private lastActiveSlotKey: string | null = null;
+
+  // Resolved BBB join URL cache: reuses the Moodle-resolved URL for the same
+  // slot so repeated join attempts during a flap don't each do a full LMS login.
+  private readonly resolvedJoinCache = new Map<string, { joinUrl: string; authStatePath: string }>();
+
+  // Last-completed-tick timestamp for health/liveness checks (Fix 4).
+  private lastTickMs = 0;
+  private static readonly LIVENESS_THRESHOLD_MS = 180 * 1000;
 
   private forceJoinPending = false;
   private forceLeavePending = false;
@@ -81,6 +102,9 @@ export class AdmiralEngine {
     this.joinFailureStreak = persisted.joinFailureStreak;
     this.joinBackoffUntilMs = persisted.joinBackoffUntilMs;
     this.lastFailedSlotKey = persisted.lastFailedSlotKey;
+    this.handoffGraceUntilMs = persisted.handoffGraceUntilMs;
+    this.handoffGraceSlotKey = persisted.handoffGraceSlotKey;
+    this.lastActiveSlotKey = persisted.lastActiveSlotKey;
 
     // A room marker surviving to boot means the previous process died while
     // in-room: the browser is gone, so reset to Out and record the recovery.
@@ -120,18 +144,28 @@ export class AdmiralEngine {
     this.recoverMissedSummary();
     this.lastActiveSlotForSummary = getActiveSlot(this.config);
 
+    // Boot-time housekeeping: prune stale outbox rows (a multi-hour outage
+    // should not flush yesterday's morning plan) and old debug artifacts
+    // (a week of screenshots should not fill the VPS disk).
+    this.center.pruneStaleOutbox();
+    void this.pruneRuntimeArtifacts();
+
     this.reason = this.dryRun
       ? "Dry run mode enabled"
       : this.standdown
         ? "Standdown enabled (restored)"
         : "Ready";
+    this.lastTickMs = Date.now();
     this.emitStatus();
 
     this.ticker = setInterval(() => {
       void this.tick();
     }, this.tickIntervalMs);
 
-    await this.tick();
+    // Non-blocking first tick: start the interval and let the first tick run
+    // in the background so the internal API can listen immediately. Otherwise
+    // heartbeats and health checks are dead for up to ~2 min during a first join.
+    void this.tick();
   }
 
   async stop(): Promise<void> {
@@ -264,12 +298,31 @@ export class AdmiralEngine {
   private async tick(): Promise<void> {
     if (this.tickInFlight) return;
     this.tickInFlight = true;
+    this.lastTickMs = Date.now();
 
     try {
       this.heartbeat.pruneOlderThan(this.config.heartbeat.missingThresholdSeconds * 12);
 
       this.activeSlot = getActiveSlot(this.config);
       this.upcomingSlot = getUpcomingSlot(this.config);
+
+      // Evict stale join-URL cache entries when the active slot changes so an
+      // expired URL from a previous class does not get reused.
+      this.evictStaleJoinCache();
+
+      // Clear handoff grace when the user's heartbeat is fresh (they're back
+      // on the PWA, so the flap risk is gone) or when the grace slot has ended.
+      if (this.handoffGraceSlotKey) {
+        const heartbeatAge = this.heartbeat.getNewestAgeSeconds();
+        const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
+        const graceSlotEnded =
+          !this.activeSlot || this.sessionKey(this.activeSlot) !== this.handoffGraceSlotKey;
+        if (heartbeatFresh || graceSlotEnded || Date.now() >= this.handoffGraceUntilMs) {
+          this.handoffGraceUntilMs = 0;
+          this.handoffGraceSlotKey = null;
+          this.persistControlState();
+        }
+      }
 
       // Scheduled daily emails (morning plan, 4pm wrap-up) and per-session
       // summary detection run on the same heartbeat as the rest of the tick.
@@ -303,6 +356,24 @@ export class AdmiralEngine {
       const heartbeatMissing = heartbeatAge == null || heartbeatAge >= this.config.heartbeat.missingThresholdSeconds;
       const duplicateConfirmed = this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes;
       const joinBackoffActive = Date.now() < this.joinBackoffUntilMs;
+      const joinGraceActive =
+        this.handoffGraceSlotKey != null &&
+        this.activeSlot != null &&
+        this.sessionKey(this.activeSlot) === this.handoffGraceSlotKey &&
+        Date.now() < this.handoffGraceUntilMs;
+
+      // Detect slot transition: a new class has started. When this is true,
+      // Admiral auto-joins regardless of heartbeat status — the heartbeat may
+      // still be "fresh" from the previous session (the user clicked "Join
+      // Myself" and the PWA kept sending heartbeats). We override
+      // heartbeatFresh to false so the state machine's fresh-heartbeat gate
+      // doesn't block the new-slot join.
+      const currentSlotKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+      const newSlotStarted = currentSlotKey != null && currentSlotKey !== this.lastActiveSlotKey;
+      this.lastActiveSlotKey = currentSlotKey;
+      this.persistControlState();
+
+      const effectiveHeartbeatFresh = newSlotStarted ? false : heartbeatFresh;
 
       // Session stand-down suppresses auto-join for a specific slot. It is
       // passed as a separate gate signal (like backoff/duplicate) rather than
@@ -315,7 +386,7 @@ export class AdmiralEngine {
 
       const transition = nextTransition(this.state, {
         hasActiveSlot: this.activeSlot != null,
-        heartbeatFresh,
+        heartbeatFresh: effectiveHeartbeatFresh,
         heartbeatMissing,
         duplicateConfirmed,
         standdown: this.standdown,
@@ -324,7 +395,9 @@ export class AdmiralEngine {
         forceLeave: this.forceLeavePending,
         joinCompleted: false,
         leaveCompleted: false,
-        joinBackoffActive
+        joinBackoffActive,
+        joinGraceActive,
+        newSlotStarted
       });
 
       this.reason = transition.reason;
@@ -336,7 +409,7 @@ export class AdmiralEngine {
         const joined = await this.performJoin(this.activeSlot);
         const follow = nextTransition("Joining", {
           hasActiveSlot: this.activeSlot != null,
-          heartbeatFresh,
+          heartbeatFresh: effectiveHeartbeatFresh,
           heartbeatMissing,
           duplicateConfirmed,
           standdown: this.standdown,
@@ -345,7 +418,9 @@ export class AdmiralEngine {
           forceLeave: this.forceLeavePending,
           joinCompleted: joined,
           leaveCompleted: false,
-          joinBackoffActive
+          joinBackoffActive,
+          joinGraceActive,
+          newSlotStarted
         });
 
         this.state = follow.nextState;
@@ -357,7 +432,7 @@ export class AdmiralEngine {
         const left = await this.performLeave();
         const follow = nextTransition("Leaving", {
           hasActiveSlot: this.activeSlot != null,
-          heartbeatFresh,
+          heartbeatFresh: effectiveHeartbeatFresh,
           heartbeatMissing,
           duplicateConfirmed,
           standdown: this.standdown,
@@ -366,7 +441,9 @@ export class AdmiralEngine {
           forceLeave: false,
           joinCompleted: false,
           leaveCompleted: left,
-          joinBackoffActive
+          joinBackoffActive,
+          joinGraceActive,
+          newSlotStarted
         });
 
         this.state = follow.nextState;
@@ -384,6 +461,13 @@ export class AdmiralEngine {
               slot: this.currentRoomSlot,
               payload: { slot: this.currentRoomSlot }
             });
+            // Set handoff re-join grace: block auto-rejoin for this slot for a
+            // grace window so Admiral doesn't flap join/leave every ~90s while
+            // the user is in the BBB app with the PWA backgrounded.
+            if (this.currentRoomSlot) {
+              this.handoffGraceSlotKey = this.sessionKey(this.currentRoomSlot);
+              this.handoffGraceUntilMs = Date.now() + AdmiralEngine.HANDOFF_GRACE_MS;
+            }
           }
 
           this.participantSnapshot = { count: 0, names: [], nameExactMatchCount: 0 };
@@ -408,7 +492,11 @@ export class AdmiralEngine {
       this.forceLeavePending = false;
       this.emitStatus();
 
-      await this.center.flushDue().catch((e) => {
+      // Non-blocking email flush: a slow/hung Resend API must never stall the
+      // engine tick (which would block all future joins/leaves). The center's
+      // own fetch has a 10s timeout; running it fire-and-forget keeps the tick
+      // responsive even if that timeout triggers.
+      void this.center.flushDue().catch((e) => {
         console.warn(`Notification flush failed: ${e instanceof Error ? e.message : String(e)}`);
       });
     } catch (error) {
@@ -452,17 +540,27 @@ export class AdmiralEngine {
     }
 
     try {
+      const slotKey = this.sessionKey(slot);
       const runtimeDir = runtimePrefixForSlot(slot);
-      const resolved = await resolveJoinUrl({
-        lmsUrl: process.env.LMS_URL ?? "",
-        username: process.env.MOODLE_USERNAME,
-        password: process.env.MOODLE_PASSWORD,
-        classPageUrl: slot.classPageUrl,
-        joinLinkText: slot.joinLinkText,
-        headless: this.headless,
-        postClickWaitMs: this.postClickWaitMs,
-        runtimeDir
-      });
+
+      // Reuse the cached resolved join URL for this slot so repeated join
+      // attempts during a flap don't each do a full Moodle login (~40/hour
+      // without this). On failure the entry is evicted so an expired URL
+      // self-heals on the next tick.
+      let resolved = this.resolvedJoinCache.get(slotKey);
+      if (!resolved) {
+        resolved = await resolveJoinUrl({
+          lmsUrl: process.env.LMS_URL ?? "",
+          username: process.env.MOODLE_USERNAME,
+          password: process.env.MOODLE_PASSWORD,
+          classPageUrl: slot.classPageUrl,
+          joinLinkText: slot.joinLinkText,
+          headless: this.headless,
+          postClickWaitMs: this.postClickWaitMs,
+          runtimeDir
+        });
+        this.resolvedJoinCache.set(slotKey, resolved);
+      }
 
       this.bbbJoinUrl = resolved.joinUrl;
 
@@ -500,6 +598,9 @@ export class AdmiralEngine {
 
       // Clear the stale join URL — the join did not complete.
       this.bbbJoinUrl = null;
+      // Evict the cached resolved URL for this slot: a stale/expired URL is the
+      // most likely cause of a join failure, so force a fresh resolve next time.
+      this.resolvedJoinCache.delete(this.sessionKey(slot));
 
       // Track consecutive failures per slot and back off after the cap.
       const slotKey = this.sessionKey(slot);
@@ -570,6 +671,16 @@ export class AdmiralEngine {
     this.center = center;
   }
 
+  /** Last time a tick completed (for health/liveness checks). */
+  getLastTickMs(): number {
+    return this.lastTickMs;
+  }
+
+  /** True if the engine has ticked recently enough to be considered alive. */
+  isAlive(): boolean {
+    return Date.now() - this.lastTickMs < AdmiralEngine.LIVENESS_THRESHOLD_MS;
+  }
+
   /** Enqueues a session summary when the active slot changes or ends. */
   private detectSlotEndForSummary(): void {
     const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
@@ -590,6 +701,37 @@ export class AdmiralEngine {
     this.center.enqueue({ kind: "session_summary", slot: recent });
   }
 
+  /** Drops join-URL cache entries that no longer match the active slot. */
+  private evictStaleJoinCache(): void {
+    const activeKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+    for (const key of this.resolvedJoinCache.keys()) {
+      if (key !== activeKey) this.resolvedJoinCache.delete(key);
+    }
+  }
+
+  /**
+   * Removes .runtime/worker/ files older than 7 days on boot so a week of
+   * screenshots and debug logs cannot fill the VPS disk while you're away.
+   */
+  private async pruneRuntimeArtifacts(): Promise<void> {
+    const dir = ".runtime/worker";
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return; // directory does not exist yet — nothing to prune
+    }
+    for (const name of entries) {
+      try {
+        const s = await stat(`${dir}/${name}`);
+        if (s.mtimeMs < cutoff) await rm(`${dir}/${name}`, { recursive: true, force: true });
+      } catch {
+        // ignore individual file errors — pruning is best-effort
+      }
+    }
+  }
+
   /** Snapshots durable control state to SQLite so it survives restarts. */
   private persistControlState(): void {
     this.persistence.saveWorkerState({
@@ -598,7 +740,10 @@ export class AdmiralEngine {
       joinFailureStreak: this.joinFailureStreak,
       joinBackoffUntilMs: this.joinBackoffUntilMs,
       lastFailedSlotKey: this.lastFailedSlotKey,
-      currentRoomSlot: this.currentRoomSlot
+      currentRoomSlot: this.currentRoomSlot,
+      handoffGraceUntilMs: this.handoffGraceUntilMs,
+      handoffGraceSlotKey: this.handoffGraceSlotKey,
+      lastActiveSlotKey: this.lastActiveSlotKey
     });
   }
 }

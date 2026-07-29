@@ -8,6 +8,13 @@ services:
     volumes:
       - admiral_data:/app/data
     restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test:
         [
@@ -17,8 +24,9 @@ services:
           "fetch('http://127.0.0.1:8787/internal/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
         ]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
+      start_period: 60s
 
   api:
     build:
@@ -31,6 +39,29 @@ services:
         condition: service_healthy
     network_mode: service:worker
     restart: unless-stopped
+    labels:
+      autoheal: "true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Autoheal watches containers with `autoheal: "true"` and restarts any that
+  # become unhealthy — closing the gap that `restart: unless-stopped` alone
+  # can't cover (a wedged-but-alive process that Docker never restarts).
+  autoheal:
+    image: willfarrell/autoheal:latest
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:2
@@ -46,6 +77,11 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   caddy_data:

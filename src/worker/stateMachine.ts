@@ -12,6 +12,8 @@ export type TickSignals = {
   joinCompleted: boolean;
   leaveCompleted: boolean;
   joinBackoffActive: boolean;
+  joinGraceActive: boolean;
+  newSlotStarted: boolean;
 };
 
 export type Transition = {
@@ -53,17 +55,28 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
     // Session stand-down is a join gate, modelled like backoff and duplicate:
     // the slot genuinely exists (hasActiveSlot stays truthful), we just refuse
     // to auto-join for it.
+    //
+    // newSlotStarted: when a new class starts, Admiral auto-joins regardless of
+    // heartbeat status — the heartbeat may still be "fresh" from the user's
+    // previous session (they clicked "Join Myself" and the PWA kept sending
+    // heartbeats). The engine overrides heartbeatFresh to false when
+    // newSlotStarted is true, so the fresh-heartbeat gate doesn't block it.
     const joinAllowedBySignals =
       s.hasActiveSlot &&
-      s.heartbeatMissing &&
+      (s.heartbeatMissing || s.newSlotStarted) &&
       !s.heartbeatFresh &&
       !s.duplicateConfirmed &&
       !s.joinBackoffActive &&
-      !s.sessionSuppressed;
+      !s.sessionSuppressed &&
+      !s.joinGraceActive;
     if (s.forceJoin || joinAllowedBySignals) {
       return {
         nextState: "Joining",
-        reason: s.forceJoin ? "Manual force-join override" : "Active slot with stale heartbeat",
+        reason: s.forceJoin
+          ? "Manual force-join override"
+          : s.newSlotStarted
+            ? "New slot started; auto-joining"
+            : "Active slot with stale heartbeat",
         shouldAttemptJoin: true,
         shouldAttemptLeave: false
       };
@@ -77,7 +90,9 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
         ? "Session stood down"
         : s.joinBackoffActive
           ? "Backing off after repeated join failures"
-          : "Heartbeat still fresh; holding off";
+          : s.joinGraceActive
+            ? "Holding off after handoff (user likely present)"
+            : "Heartbeat still fresh; holding off";
     }
 
     return {
