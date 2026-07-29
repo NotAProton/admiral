@@ -80,7 +80,44 @@
         overflow: auto;
         max-height: 320px;
       }
-      .hidden { display: none; }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      button.busy { opacity: 0.75; cursor: wait; }
+      .error-banner {
+        background: #fdecea;
+        border: 1px solid #f5a7a7;
+        border-radius: 10px;
+        color: var(--danger);
+        padding: 10px 14px;
+        font-size: 13px;
+        display: none;
+      }
+      .session-standdown-pill {
+        background: #fff3cd;
+        border: 1px solid #f0c040;
+        border-radius: 999px;
+        padding: 6px 12px;
+        font-size: 13px;
+        color: #7a5c00;
+        display: none;
+        align-items: center;
+        gap: 8px;
+      }
+      .status-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .stat-box {
+        background: #fff;
+        border: 1px solid #e8d9bc;
+        border-radius: 12px;
+        padding: 10px 14px;
+      }
+      .stat-box .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+      .stat-box .value { font-size: 18px; font-weight: 700; }
+      .stat-box .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+      details > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 10px 0 6px; }
     </style>
   </head>
   <body>
@@ -102,20 +139,50 @@
       </div>
 
       <div id="appCard" class="card hidden">
-        <div class="row" style="margin-bottom: 12px">
+        <div id="errorBanner" class="error-banner" style="margin-bottom: 10px"></div>
+        <div class="row" style="margin-bottom: 10px; flex-wrap: wrap">
           <button id="joinBtn">Force Join</button>
           <button id="leaveBtn" class="danger">Force Leave</button>
           <button id="standdownOnBtn" class="secondary">Standdown On</button>
           <button id="standdownOffBtn" class="secondary">Standdown Off</button>
+          <button id="standdownSessionBtn" class="secondary">Stand Down This Session</button>
+          <button id="cancelSessionStanddownBtn" class="secondary hidden">Cancel Session Stand-Down</button>
           <button id="openJoinBtn" class="secondary">Join Myself</button>
+          <button id="logoutBtn" class="secondary" style="margin-left: auto">Log Out</button>
         </div>
-        <div class="row" style="margin-bottom: 10px">
+        <div class="row" style="margin-bottom: 12px; flex-wrap: wrap; gap: 8px">
           <div id="siteTime" class="pill">IST time: --</div>
           <div id="upcomingClass" class="pill">Upcoming: --</div>
+          <div id="sessionStanddownPill" class="session-standdown-pill"></div>
         </div>
-        <pre id="statusPre">Loading...</pre>
-        <div class="muted" style="margin-top: 12px; margin-bottom: 6px">Parsed schedule</div>
-        <pre id="schedulePre">Loading...</pre>
+        <div class="status-summary">
+          <div class="stat-box">
+            <div class="label">State</div>
+            <div class="value" id="statState">--</div>
+            <div class="sub" id="statReason"></div>
+          </div>
+          <div class="stat-box">
+            <div class="label">Active class</div>
+            <div class="value" id="statClass">--</div>
+            <div class="sub" id="statClassTime"></div>
+          </div>
+          <div class="stat-box">
+            <div class="label">Participants</div>
+            <div class="value" id="statParticipants">--</div>
+            <div class="sub" id="statDuplicate"></div>
+          </div>
+          <div class="stat-box">
+            <div class="label">Next class in</div>
+            <div class="value" id="statCountdown">--</div>
+            <div class="sub" id="statCountdownClass"></div>
+          </div>
+        </div>
+        <details>
+          <summary>Raw status &amp; schedule JSON</summary>
+          <pre id="statusPre">Loading...</pre>
+          <div class="muted" style="margin-top: 8px; margin-bottom: 4px">Parsed schedule</div>
+          <pre id="schedulePre">Loading...</pre>
+        </details>
       </div>
     </div>
 

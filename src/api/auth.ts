@@ -27,6 +27,11 @@ export function createSessionCookie(secret: string, ttlSeconds: number): string 
   return `${COOKIE_NAME}=${value}; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=${ttlSeconds}`;
 }
 
+export function clearSessionCookie(): string {
+  const secure = process.env.COOKIE_SECURE === "false" ? "" : "Secure; ";
+  return `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; ${secure}Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+}
+
 function parseCookies(header: string | undefined): Record<string, string> {
   if (!header) return {};
 

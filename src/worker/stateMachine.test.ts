@@ -13,6 +13,7 @@ function baseSignals(overrides: Partial<TickSignals> = {}): TickSignals {
     forceLeave: false,
     joinCompleted: false,
     leaveCompleted: false,
+    joinBackoffActive: false,
     ...overrides
   };
 }
@@ -94,6 +95,25 @@ test("Manual force join overrides heartbeat gating", () => {
   const transition = nextTransition(
     "Out",
     baseSignals({ heartbeatFresh: true, heartbeatMissing: false, forceJoin: true })
+  );
+  assert.equal(transition.nextState, "Joining");
+  assert.equal(transition.shouldAttemptJoin, true);
+});
+
+test("Out does not join when join backoff is active", () => {
+  const transition = nextTransition(
+    "Out",
+    baseSignals({ joinBackoffActive: true })
+  );
+  assert.equal(transition.nextState, "Out");
+  assert.equal(transition.shouldAttemptJoin, false);
+  assert.ok(transition.reason.toLowerCase().includes("back"));
+});
+
+test("Force join bypasses backoff", () => {
+  const transition = nextTransition(
+    "Out",
+    baseSignals({ joinBackoffActive: true, forceJoin: true })
   );
   assert.equal(transition.nextState, "Joining");
   assert.equal(transition.shouldAttemptJoin, true);

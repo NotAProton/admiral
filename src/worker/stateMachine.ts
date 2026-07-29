@@ -10,6 +10,7 @@ export type TickSignals = {
   forceLeave: boolean;
   joinCompleted: boolean;
   leaveCompleted: boolean;
+  joinBackoffActive: boolean;
 };
 
 export type Transition = {
@@ -48,7 +49,8 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
   }
 
   if (current === "Out") {
-    const joinAllowedBySignals = s.hasActiveSlot && s.heartbeatMissing && !s.heartbeatFresh && !s.duplicateConfirmed;
+    const joinAllowedBySignals =
+      s.hasActiveSlot && s.heartbeatMissing && !s.heartbeatFresh && !s.duplicateConfirmed && !s.joinBackoffActive;
     if (s.forceJoin || joinAllowedBySignals) {
       return {
         nextState: "Joining",
@@ -58,9 +60,14 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
       };
     }
 
+    let reason = "No active slot";
+    if (s.hasActiveSlot) {
+      reason = s.joinBackoffActive ? "Backing off after repeated join failures" : "Heartbeat still fresh; holding off";
+    }
+
     return {
       nextState: "Out",
-      reason: s.hasActiveSlot ? "Heartbeat still fresh; holding off" : "No active slot",
+      reason,
       shouldAttemptJoin: false,
       shouldAttemptLeave: false
     };

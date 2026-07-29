@@ -31,7 +31,19 @@ export type AdmiralConfig = {
 
 export type AdmiralState = "Out" | "Joining" | "InRoom" | "Leaving";
 
-export type OverrideAction = "force_join" | "force_leave" | "standdown_on" | "standdown_off";
+export type OverrideAction =
+  | "force_join"
+  | "force_leave"
+  | "standdown_on"
+  | "standdown_off"
+  | "standdown_session"
+  | "standdown_session_cancel";
+
+export type SessionStanddown = {
+  courseId: string;
+  className: string;
+  startedAt: string;
+} | null;
 
 export type HeartbeatPayload = {
   device_id: string;
@@ -56,6 +68,7 @@ export type ActiveSlot = {
 export type StatusResponse = {
   state: AdmiralState;
   standdown: boolean;
+  sessionStanddown: SessionStanddown;
   reason: string;
   activeSlot: ActiveSlot | null;
   upcomingSlot: ActiveSlot | null;
@@ -69,4 +82,6 @@ export type StatusResponse = {
   heartbeatFresh: boolean;
   updatedAt: string;
   bbbJoinUrl: string | null;
+  joinBackoffActive: boolean;
+  joinBackoffRemainingSeconds: number | null;
 };

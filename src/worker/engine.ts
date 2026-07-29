@@ -7,14 +7,18 @@ import type {
   AdmiralState,
   OverrideAction,
   ParticipantSnapshot,
+  SessionStanddown,
   StatusResponse
 } from "../shared/types.js";
 import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
 import {
   sendJoinFailureEmail,
+  sendJoinRetriesExhaustedEmail,
   sendJoinSuccessEmail,
-  sendLeaveSuccessEmail
+  sendLeaveSuccessEmail,
+  sendSessionStanddownEmail,
+  sendStanddownEmail
 } from "./notifications.js";
 import { getActiveSlot, getCurrentIstIso, getUpcomingSlot } from "./schedule.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
@@ -40,6 +44,16 @@ export class AdmiralEngine {
 
   private forceJoinPending = false;
   private forceLeavePending = false;
+
+  // Per-session stand-down: suppress auto-join only for this specific slot.
+  private sessionStanddownSlot: ActiveSlot | null = null;
+
+  // Join-failure backoff cap.
+  private static readonly MAX_CONSECUTIVE_JOIN_FAILURES = 3;
+  private static readonly JOIN_BACKOFF_MS = 2 * 60_000;
+  private joinFailureStreak = 0;
+  private joinBackoffUntilMs = 0;
+  private lastFailedSlotKey: string | null = null;
 
   private ticker: NodeJS.Timeout | null = null;
   private tickInFlight = false;
@@ -84,11 +98,17 @@ export class AdmiralEngine {
     if (action === "standdown_on") {
       this.standdown = true;
       this.reason = "Standdown enabled by override";
+      sendStanddownEmail(true).catch((e) => {
+        console.warn(`Standdown-on email failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
     }
 
     if (action === "standdown_off") {
       this.standdown = false;
       this.reason = "Standdown disabled by override";
+      sendStanddownEmail(false).catch((e) => {
+        console.warn(`Standdown-off email failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
     }
 
     if (action === "force_join") {
@@ -101,16 +121,57 @@ export class AdmiralEngine {
       this.reason = "Force-leave requested";
     }
 
+    if (action === "standdown_session") {
+      const target = this.activeSlot ?? this.upcomingSlot;
+      if (!target) {
+        this.reason = "No active or upcoming session to stand down for";
+        this.emitStatus();
+        return;
+      }
+      this.sessionStanddownSlot = target;
+      this.reason = `Stood down for ${target.className} at ${target.startedAt}`;
+      // If we're currently in this specific slot, force-leave immediately.
+      if (this.activeSlot && this.sessionKey(this.activeSlot) === this.sessionKey(target)) {
+        if (this.state === "InRoom" || this.state === "Joining") {
+          this.forceLeavePending = true;
+        }
+      }
+      sendSessionStanddownEmail(target, false).catch((e) => {
+        console.warn(`Session-standdown email failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    }
+
+    if (action === "standdown_session_cancel") {
+      const slot = this.sessionStanddownSlot;
+      this.sessionStanddownSlot = null;
+      this.reason = "Session stand-down cancelled";
+      if (slot) {
+        sendSessionStanddownEmail(slot, true).catch((e) => {
+          console.warn(`Session-standdown-cancel email failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      }
+    }
+
     this.emitStatus();
   }
 
   getStatus(): StatusResponse {
     const heartbeatAge = this.heartbeat.getNewestAgeSeconds();
     const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
+    const backoffRemaining = this.joinBackoffUntilMs > Date.now()
+      ? Math.ceil((this.joinBackoffUntilMs - Date.now()) / 1000)
+      : null;
 
     return {
       state: this.state,
       standdown: this.standdown,
+      sessionStanddown: this.sessionStanddownSlot
+        ? {
+            courseId: this.sessionStanddownSlot.courseId,
+            className: this.sessionStanddownSlot.className,
+            startedAt: this.sessionStanddownSlot.startedAt
+          }
+        : null,
       reason: this.reason,
       activeSlot: this.activeSlot,
       upcomingSlot: this.upcomingSlot,
@@ -123,7 +184,9 @@ export class AdmiralEngine {
       lastHeartbeatAgeSeconds: heartbeatAge,
       heartbeatFresh,
       updatedAt: new Date().toISOString(),
-      bbbJoinUrl: this.bbbJoinUrl
+      bbbJoinUrl: this.bbbJoinUrl,
+      joinBackoffActive: this.joinBackoffUntilMs > Date.now(),
+      joinBackoffRemainingSeconds: backoffRemaining
     };
   }
 
@@ -146,6 +209,18 @@ export class AdmiralEngine {
       this.activeSlot = getActiveSlot(this.config);
       this.upcomingSlot = getUpcomingSlot(this.config);
 
+      // Garbage-collect session stand-down once the targeted slot is no longer
+      // active or upcoming (the class window has fully passed).
+      if (this.sessionStanddownSlot) {
+        const key = this.sessionKey(this.sessionStanddownSlot);
+        const stillRelevant =
+          (this.activeSlot && this.sessionKey(this.activeSlot) === key) ||
+          (this.upcomingSlot && this.sessionKey(this.upcomingSlot) === key);
+        if (!stillRelevant) {
+          this.sessionStanddownSlot = null;
+        }
+      }
+
       if (this.state === "InRoom") {
         await this.refreshParticipantsIfDue();
       }
@@ -154,9 +229,16 @@ export class AdmiralEngine {
       const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
       const heartbeatMissing = heartbeatAge == null || heartbeatAge >= this.config.heartbeat.missingThresholdSeconds;
       const duplicateConfirmed = this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes;
+      const joinBackoffActive = Date.now() < this.joinBackoffUntilMs;
+
+      // Suppress the active slot signal when the session stand-down targets it.
+      const sessionSuppressed =
+        this.activeSlot != null &&
+        this.sessionStanddownSlot != null &&
+        this.sessionKey(this.activeSlot) === this.sessionKey(this.sessionStanddownSlot);
 
       const transition = nextTransition(this.state, {
-        hasActiveSlot: this.activeSlot != null,
+        hasActiveSlot: this.activeSlot != null && !sessionSuppressed,
         heartbeatFresh,
         heartbeatMissing,
         duplicateConfirmed,
@@ -164,7 +246,8 @@ export class AdmiralEngine {
         forceJoin: this.forceJoinPending,
         forceLeave: this.forceLeavePending,
         joinCompleted: false,
-        leaveCompleted: false
+        leaveCompleted: false,
+        joinBackoffActive
       });
 
       this.reason = transition.reason;
@@ -175,7 +258,7 @@ export class AdmiralEngine {
 
         const joined = await this.performJoin(this.activeSlot);
         const follow = nextTransition("Joining", {
-          hasActiveSlot: this.activeSlot != null,
+          hasActiveSlot: this.activeSlot != null && !sessionSuppressed,
           heartbeatFresh,
           heartbeatMissing,
           duplicateConfirmed,
@@ -183,7 +266,8 @@ export class AdmiralEngine {
           forceJoin: false,
           forceLeave: this.forceLeavePending,
           joinCompleted: joined,
-          leaveCompleted: false
+          leaveCompleted: false,
+          joinBackoffActive
         });
 
         this.state = follow.nextState;
@@ -194,7 +278,7 @@ export class AdmiralEngine {
 
         const left = await this.performLeave();
         const follow = nextTransition("Leaving", {
-          hasActiveSlot: this.activeSlot != null,
+          hasActiveSlot: this.activeSlot != null && !sessionSuppressed,
           heartbeatFresh,
           heartbeatMissing,
           duplicateConfirmed,
@@ -202,7 +286,8 @@ export class AdmiralEngine {
           forceJoin: false,
           forceLeave: false,
           joinCompleted: false,
-          leaveCompleted: left
+          leaveCompleted: left,
+          joinBackoffActive
         });
 
         this.state = follow.nextState;
@@ -259,6 +344,9 @@ export class AdmiralEngine {
   private async performJoin(slot: ActiveSlot): Promise<boolean> {
     if (this.dryRun) {
       this.reason = `Dry-run: would join ${slot.courseId}`;
+      // Reset failure tracking on a successful (dry-run) join.
+      this.joinFailureStreak = 0;
+      this.lastFailedSlotKey = null;
       return true;
     }
 
@@ -289,6 +377,10 @@ export class AdmiralEngine {
       await this.refreshParticipantsIfDue();
       this.currentRoomSlot = slot;
 
+      // Successful join — clear failure tracking.
+      this.joinFailureStreak = 0;
+      this.lastFailedSlotKey = null;
+
       await sendJoinSuccessEmail(slot, resolved.joinUrl).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(`Join-success email failed: ${message}`);
@@ -299,10 +391,33 @@ export class AdmiralEngine {
       const message = error instanceof Error ? error.message : String(error);
       this.reason = `Join failed: ${message}`;
 
-      await sendJoinFailureEmail(slot, message).catch((notifyError) => {
-        const notifyMessage = notifyError instanceof Error ? notifyError.message : String(notifyError);
-        console.warn(`Join-failure email failed: ${notifyMessage}`);
-      });
+      // Track consecutive failures per slot and back off after the cap.
+      const slotKey = this.sessionKey(slot);
+      if (this.lastFailedSlotKey !== slotKey) {
+        this.joinFailureStreak = 1;
+        this.lastFailedSlotKey = slotKey;
+      } else {
+        this.joinFailureStreak += 1;
+      }
+
+      if (this.joinFailureStreak >= AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES) {
+        this.joinBackoffUntilMs = Date.now() + AdmiralEngine.JOIN_BACKOFF_MS;
+        this.joinFailureStreak = 0;
+        this.lastFailedSlotKey = null;
+        const backoffMinutes = AdmiralEngine.JOIN_BACKOFF_MS / 60_000;
+        await sendJoinRetriesExhaustedEmail(
+          slot,
+          AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES,
+          backoffMinutes
+        ).catch((e) => {
+          console.warn(`Join-retries-exhausted email failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      } else {
+        await sendJoinFailureEmail(slot, message).catch((notifyError) => {
+          const notifyMessage = notifyError instanceof Error ? notifyError.message : String(notifyError);
+          console.warn(`Join-failure email failed: ${notifyMessage}`);
+        });
+      }
 
       return false;
     }
@@ -322,5 +437,9 @@ export class AdmiralEngine {
       this.reason = `Leave failed: ${error instanceof Error ? error.message : String(error)}`;
       return false;
     }
+  }
+
+  private sessionKey(slot: ActiveSlot): string {
+    return `${slot.courseId}@${slot.startedAt}`;
   }
 }

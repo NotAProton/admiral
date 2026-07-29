@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import Fastify from "fastify";
 import { z } from "zod";
-import { createSessionCookie, isAuthenticated } from "./auth.js";
+import { createSessionCookie, clearSessionCookie, isAuthenticated } from "./auth.js";
 
 const app = Fastify({ logger: true });
 
@@ -13,9 +13,58 @@ const accessToken = process.env.ADMIRAL_ACCESS_TOKEN ?? "";
 const sessionSecret = process.env.SESSION_SECRET ?? "change-me";
 const sessionTtlSeconds = Number(process.env.SESSION_TTL_SECONDS ?? 60 * 60 * 12);
 
+// Refuse to start with the default secret in production.
+if ((sessionSecret === "change-me" || sessionSecret === "") && process.env.NODE_ENV === "production") {
+  console.error("FATAL: SESSION_SECRET must be set to a strong secret in production. Refusing to start.");
+  process.exit(1);
+} else if (sessionSecret === "change-me" || sessionSecret === "") {
+  console.warn("WARNING: SESSION_SECRET is using the default value. Set a strong secret before deploying.");
+}
+
+// Simple in-memory login rate limiter: max 5 failed attempts per IP per 5 minutes.
+const LOGIN_RATE_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_RATE_MAX_FAILURES = 5;
+const loginFailures = new Map<string, number[]>();
+
+function isLoginRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const attempts = (loginFailures.get(ip) ?? []).filter((t) => now - t < LOGIN_RATE_WINDOW_MS);
+  loginFailures.set(ip, attempts);
+  return attempts.length >= LOGIN_RATE_MAX_FAILURES;
+}
+
+function recordLoginFailure(ip: string): void {
+  const now = Date.now();
+  const attempts = (loginFailures.get(ip) ?? []).filter((t) => now - t < LOGIN_RATE_WINDOW_MS);
+  attempts.push(now);
+  loginFailures.set(ip, attempts);
+}
+
+function clearLoginFailures(ip: string): void {
+  loginFailures.delete(ip);
+}
+
+// Defense-in-depth: check Origin/Referer matches our domain on state-changing routes.
+const mutatingPaths = new Set(["/login", "/override", "/heartbeat", "/logout"]);
+const allowedHost = process.env.ADMIRAL_DOMAIN ?? "";
+
+function originAllowed(request: { headers: Record<string, string | string[] | undefined>; ip: string }): boolean {
+  if (!allowedHost) return true; // not configured, skip check
+  const origin = request.headers["origin"];
+  const referer = request.headers["referer"];
+  const check = (origin ?? referer ?? "") as string;
+  if (!check) return true; // same-origin requests without header (e.g. curl) — allow
+  try {
+    const { host } = new URL(check);
+    return host === allowedHost;
+  } catch {
+    return false;
+  }
+}
+
 const loginSchema = z.object({ token: z.string().min(1) });
 const heartbeatSchema = z.object({ device_id: z.string().min(1) });
-const overrideSchema = z.object({ action: z.enum(["force_join", "force_leave", "standdown_on", "standdown_off"]) });
+const overrideSchema = z.object({ action: z.enum(["force_join", "force_leave", "standdown_on", "standdown_off", "standdown_session", "standdown_session_cancel"]) });
 
 const publicFiles: Record<string, string> = {
   "/": resolve("web/index.html"),
@@ -26,12 +75,21 @@ const publicFiles: Record<string, string> = {
 
 app.addHook("onRequest", async (request, reply) => {
   const path = request.url.split("?")[0] ?? "/";
-  const isPublicRoute = path in publicFiles || path === "/login" || path === "/health";
+  const isPublicRoute = path in publicFiles || path === "/login" || path === "/health" || path === "/logout";
   if (isPublicRoute) return;
 
   const authOk = isAuthenticated(request.headers.cookie, sessionSecret);
   if (!authOk) {
     return reply.code(401).send({ error: "Unauthorized" });
+  }
+});
+
+app.addHook("onRequest", async (request, reply) => {
+  const path = request.url.split("?")[0] ?? "/";
+  if (request.method === "POST" && mutatingPaths.has(path)) {
+    if (!originAllowed(request as any)) {
+      return reply.code(403).send({ error: "Forbidden: origin mismatch" });
+    }
   }
 });
 
@@ -46,12 +104,24 @@ for (const [routePath, filePath] of Object.entries(publicFiles)) {
 }
 
 app.post("/login", async (request, reply) => {
+  const ip = request.ip;
+  if (isLoginRateLimited(ip)) {
+    return reply.code(429).send({ error: "Too many login attempts. Please wait a few minutes." });
+  }
+
   const body = loginSchema.parse(request.body);
   if (!accessToken || body.token !== accessToken) {
+    recordLoginFailure(ip);
     return reply.code(401).send({ error: "Invalid token" });
   }
 
+  clearLoginFailures(ip);
   reply.header("Set-Cookie", createSessionCookie(sessionSecret, sessionTtlSeconds));
+  return { ok: true };
+});
+
+app.post("/logout", async (_request, reply) => {
+  reply.header("Set-Cookie", clearSessionCookie());
   return { ok: true };
 });
 

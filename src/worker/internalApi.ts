@@ -8,7 +8,7 @@ const heartbeatSchema = z.object({
 });
 
 const overrideSchema = z.object({
-  action: z.enum(["force_join", "force_leave", "standdown_on", "standdown_off"])
+  action: z.enum(["force_join", "force_leave", "standdown_on", "standdown_off", "standdown_session", "standdown_session_cancel"])
 });
 
 function writeSse(reply: FastifyReply, event: string, payload: StatusResponse): void {
