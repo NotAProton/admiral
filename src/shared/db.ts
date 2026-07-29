@@ -50,6 +50,44 @@ const MIGRATIONS: readonly Migration[] = [
       );
       CREATE INDEX idx_email_log_ts ON email_log (ts_ms);
     `
+  },
+  {
+    version: 2,
+    statements: `
+      -- Notification outbox: intents that are waiting to be sent. Pending rows
+      -- survive worker restarts so a notification enqueued just before a crash
+      -- still ships on the next boot.
+      CREATE TABLE email_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_ms INTEGER NOT NULL,
+        not_before_ms INTEGER NOT NULL,
+        priority INTEGER NOT NULL,         -- 0 = action-required, 1 = session milestone, 2 = ack/info
+        kind TEXT NOT NULL,
+        slot_key TEXT,
+        dedupe_key TEXT,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | sent | failed | cancelled | suppressed
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+      );
+      CREATE INDEX idx_outbox_due ON email_outbox (status, not_before_ms);
+      CREATE INDEX idx_outbox_slot ON email_outbox (slot_key);
+      CREATE INDEX idx_outbox_dedupe ON email_outbox (dedupe_key);
+
+      -- Consumed dedupe keys: records which (kind, session) notifications have
+      -- already been sent so per-session caps hold across restarts.
+      CREATE TABLE email_dedupe (
+        dedupe_key TEXT PRIMARY KEY,
+        ts_ms INTEGER NOT NULL
+      );
+
+      -- Tracks dedupe_key on each actual send (for ad-hoc queries / audits).
+      ALTER TABLE email_log ADD COLUMN dedupe_key TEXT;
+      CREATE INDEX idx_email_log_dedupe ON email_log (dedupe_key);
+
+      -- Index events by slot so session summaries can be rendered from history.
+      CREATE INDEX idx_events_slot ON events (slot_key);
+    `
   }
 ];
 

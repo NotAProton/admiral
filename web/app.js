@@ -216,6 +216,13 @@ function renderStatus(status) {
   document.getElementById("standdownOnBtn").disabled = status.standdown;
   document.getElementById("standdownOffBtn").disabled = !status.standdown;
 
+  // Email budget pill (today's sends vs the IST-day cap)
+  const emailPill = document.getElementById("emailBudgetPill");
+  if (emailPill && status.emailBudget) {
+    emailPill.textContent = `Emails today: ${status.emailBudget.emailsToday}/${status.emailBudget.emailDailyCap}` +
+      (status.emailBudget.suppressedToday > 0 ? ` · ${status.emailBudget.suppressedToday} muted` : "");
+  }
+
   renderCountdown();
 }
 
@@ -316,6 +323,8 @@ const HISTORY_KIND_LABELS = {
   leave_failed: "Leave failed",
   override: "Override",
   email_suppressed: "Email muted",
+  email_send_failed: "Email send failed",
+  session_update: "Email sent (session update)",
   session_standdown_cleared: "Stand-down cleared",
   recovered_after_restart: "Recovered"
 };

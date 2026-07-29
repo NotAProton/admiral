@@ -100,6 +100,58 @@ export function getActiveSlot(config: AdmiralConfig): ActiveSlot | null {
   return null;
 }
 
+/**
+ * Most recent slot that has already ended (IST), within the last 6 hours.
+ * Used by the worker to recover a missed session-summary notification after
+ * a restart that happened right at a slot boundary.
+ */
+export function getMostRecentEndedSlot(config: AdmiralConfig): ActiveSlot | null {
+  const now = nowInIst();
+  const nowMinutes = now.minutes;
+  const nowDayIndex = dayOrder.indexOf(now.day);
+  const nowMs = Date.now();
+  const sixHoursMs = 6 * 60 * 60 * 1000;
+
+  let best: { endedAtMs: number; slot: ActiveSlot } | null = null;
+
+  for (const course of config.courses) {
+    for (const weeklySlot of course.weeklySlots) {
+      for (const day of weeklySlot.days) {
+        const slotDayIndex = dayOrder.indexOf(day);
+        const endMin = hhmmToMinutes(weeklySlot.end);
+
+        let datePrefix: string;
+        if (slotDayIndex === nowDayIndex) {
+          if (endMin > nowMinutes) continue; // not ended yet today
+          datePrefix = now.iso.slice(0, 10);
+        } else {
+          let deltaBack = (nowDayIndex - slotDayIndex + 7) % 7;
+          if (deltaBack === 0) deltaBack = 7;
+          const candidateDate = new Date(nowMs - deltaBack * 24 * 60 * 60 * 1000);
+          const parts = formatPartsInIst(candidateDate);
+          datePrefix = `${parts.year}-${parts.month}-${parts.day}`;
+        }
+
+        const slot: ActiveSlot = {
+          courseId: course.courseId,
+          className: course.className,
+          classPageUrl: course.classPageUrl,
+          joinLinkText: course.joinLinkText,
+          myDisplayName: course.myDisplayName,
+          startedAt: istIso(datePrefix, weeklySlot.start),
+          endsAt: istIso(datePrefix, weeklySlot.end)
+        };
+        const endedAtMs = new Date(slot.endsAt).getTime();
+        if (endedAtMs > nowMs) continue;
+        if (nowMs - endedAtMs > sixHoursMs) continue;
+        if (!best || endedAtMs > best.endedAtMs) best = { endedAtMs, slot };
+      }
+    }
+  }
+
+  return best?.slot ?? null;
+}
+
 export function getUpcomingSlot(config: AdmiralConfig): ActiveSlot | null {
   const now = nowInIst();
   const nowDate = new Date();

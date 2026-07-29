@@ -116,11 +116,11 @@ test("email ledger counts within windows and prunes old rows", () => {
   const p = memoryPersistence();
   const nowMs = 1_800_000_000_000;
 
-  p.recordEmail("join_success", "a", nowMs - 25 * 60 * 60 * 1000); // older than 24h retention
+  p.recordEmail("join_success", "a", nowMs - 46 * 24 * 60 * 60 * 1000); // older than 45-day retention
   p.recordEmail("join_failure", "b", nowMs - 2 * 60 * 1000);
   p.recordEmail("leave_success", "c", nowMs);
 
-  // Recording "c" pruned the 25h-old row; two rows remain.
+  // Recording "c" pruned the 46-day-old row; two rows remain.
   assert.equal(p.countEmailsSince(0), 2);
   assert.equal(p.countEmailsSince(nowMs - 60 * 1000), 1);
   assert.equal(p.countEmailsSince(nowMs - 15 * 60 * 1000), 2);
@@ -151,7 +151,7 @@ test("state survives close and reopen of a file-backed database", () => {
     // Reopening runs migrations idempotently: schema version stays applied.
     const db = openDatabase(dbPath);
     const row = db.prepare("PRAGMA user_version").get() as unknown as { user_version: number };
-    assert.equal(row.user_version, 1);
+    assert.equal(row.user_version, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

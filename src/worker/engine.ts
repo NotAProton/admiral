@@ -14,15 +14,8 @@ import type {
 import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
 import type { WorkerPersistence } from "./persistence.js";
-import {
-  sendJoinFailureEmail,
-  sendJoinRetriesExhaustedEmail,
-  sendJoinSuccessEmail,
-  sendLeaveSuccessEmail,
-  sendSessionStanddownEmail,
-  sendStanddownEmail
-} from "./notifications.js";
-import { getActiveSlot, getCurrentIstIso, getUpcomingSlot } from "./schedule.js";
+import { NotificationCenter } from "./notifications.js";
+import { getActiveSlot, getCurrentIstIso, getMostRecentEndedSlot, getUpcomingSlot } from "./schedule.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { nextTransition } from "./stateMachine.js";
 
@@ -43,6 +36,8 @@ export class AdmiralEngine {
   private lastScrapeAtMs = 0;
   private bbbJoinUrl: string | null = null;
   private currentRoomSlot: ActiveSlot | null = null;
+  private lastActiveSlotForSummary: ActiveSlot | null = null;
+  private center!: NotificationCenter;
 
   private forceJoinPending = false;
   private forceLeavePending = false;
@@ -120,6 +115,11 @@ export class AdmiralEngine {
       }
     }
 
+    // Recover a session summary that may have been missed if the worker
+    // restarted right at a slot boundary, and seed slot-end tracking.
+    this.recoverMissedSummary();
+    this.lastActiveSlotForSummary = getActiveSlot(this.config);
+
     this.reason = this.dryRun
       ? "Dry run mode enabled"
       : this.standdown
@@ -137,6 +137,7 @@ export class AdmiralEngine {
   async stop(): Promise<void> {
     if (this.ticker) clearInterval(this.ticker);
     this.ticker = null;
+    await this.center.stop().catch(() => undefined);
     await this.bbb.leave().catch(() => undefined);
     // Clean shutdown: the room session is over, so clear the durable marker to
     // avoid a spurious recovered_after_restart event on next boot.
@@ -155,17 +156,13 @@ export class AdmiralEngine {
     if (action === "standdown_on") {
       this.standdown = true;
       this.reason = "Standdown enabled by override";
-      sendStanddownEmail(true).catch((e) => {
-        console.warn(`Standdown-on email failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      this.center.enqueue({ kind: "standdown", payload: { active: true } });
     }
 
     if (action === "standdown_off") {
       this.standdown = false;
       this.reason = "Standdown disabled by override";
-      sendStanddownEmail(false).catch((e) => {
-        console.warn(`Standdown-off email failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      this.center.enqueue({ kind: "standdown", payload: { active: false } });
     }
 
     if (action === "force_join") {
@@ -198,9 +195,7 @@ export class AdmiralEngine {
           this.forceLeavePending = true;
         }
       }
-      sendSessionStanddownEmail(target, false).catch((e) => {
-        console.warn(`Session-standdown email failed: ${e instanceof Error ? e.message : String(e)}`);
-      });
+      this.center.enqueue({ kind: "session_standdown", slot: target, payload: { slot: target, cancelled: false } });
     }
 
     if (action === "standdown_session_cancel") {
@@ -208,9 +203,7 @@ export class AdmiralEngine {
       this.sessionStanddownSlot = null;
       this.reason = "Session stand-down cancelled";
       if (slot) {
-        sendSessionStanddownEmail(slot, true).catch((e) => {
-          console.warn(`Session-standdown-cancel email failed: ${e instanceof Error ? e.message : String(e)}`);
-        });
+        this.center.enqueue({ kind: "session_standdown", slot, payload: { slot, cancelled: true } });
       }
     }
 
@@ -250,7 +243,8 @@ export class AdmiralEngine {
       updatedAt: new Date().toISOString(),
       bbbJoinUrl: this.bbbJoinUrl,
       joinBackoffActive: this.joinBackoffUntilMs > Date.now(),
-      joinBackoffRemainingSeconds: backoffRemaining
+      joinBackoffRemainingSeconds: backoffRemaining,
+      emailBudget: this.center.getBudgetSnapshot()
     };
   }
 
@@ -276,6 +270,11 @@ export class AdmiralEngine {
 
       this.activeSlot = getActiveSlot(this.config);
       this.upcomingSlot = getUpcomingSlot(this.config);
+
+      // Scheduled daily emails (morning plan, 4pm wrap-up) and per-session
+      // summary detection run on the same heartbeat as the rest of the tick.
+      this.center.maybeFireScheduledDaily();
+      this.detectSlotEndForSummary();
 
       // Garbage-collect session stand-down once the targeted slot is no longer
       // active or upcoming (the class window has fully passed).
@@ -377,10 +376,15 @@ export class AdmiralEngine {
             slot: this.currentRoomSlot,
             payload: { trigger: transition.reason }
           });
-          await sendLeaveSuccessEmail(this.currentRoomSlot).catch((error) => {
-            const message = error instanceof Error ? error.message : String(error);
-            console.warn(`Leave-success email failed: ${message}`);
-          });
+          // Only the handoff case gets its own email; other leave causes
+          // are covered by the session summary or the standdown ack.
+          if (transition.reason.includes("Duplicate")) {
+            this.center.enqueue({
+              kind: "handoff",
+              slot: this.currentRoomSlot,
+              payload: { slot: this.currentRoomSlot }
+            });
+          }
 
           this.participantSnapshot = { count: 0, names: [], nameExactMatchCount: 0 };
           this.duplicateStreak = 0;
@@ -403,6 +407,10 @@ export class AdmiralEngine {
       this.forceJoinPending = false;
       this.forceLeavePending = false;
       this.emitStatus();
+
+      await this.center.flushDue().catch((e) => {
+        console.warn(`Notification flush failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
     } catch (error) {
       this.reason = `Engine tick error: ${error instanceof Error ? error.message : String(error)}`;
       this.emitStatus();
@@ -476,9 +484,13 @@ export class AdmiralEngine {
       this.persistControlState();
       this.persistence.appendEvent({ kind: "join_success", slot });
 
-      await sendJoinSuccessEmail(slot, resolved.joinUrl).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`Join-success email failed: ${message}`);
+      const coverKind = this.center.wasCoverStarted(this.sessionKey(slot))
+        ? "cover_resume"
+        : "cover_start";
+      this.center.enqueue({
+        kind: coverKind,
+        slot,
+        payload: { slot, joinUrl: resolved.joinUrl }
       });
 
       return true;
@@ -514,19 +526,19 @@ export class AdmiralEngine {
           slot,
           payload: { backoffMinutes, untilMs: this.joinBackoffUntilMs }
         });
-        await sendJoinRetriesExhaustedEmail(
+        this.center.enqueue({
+          kind: "action_needed",
           slot,
-          AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES,
-          backoffMinutes
-        ).catch((e) => {
-          console.warn(`Join-retries-exhausted email failed: ${e instanceof Error ? e.message : String(e)}`);
-        });
-      } else {
-        await sendJoinFailureEmail(slot, message).catch((notifyError) => {
-          const notifyMessage = notifyError instanceof Error ? notifyError.message : String(notifyError);
-          console.warn(`Join-failure email failed: ${notifyMessage}`);
+          payload: {
+            reason: "retries_exhausted",
+            failureCount: AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES,
+            backoffMinutes
+          }
         });
       }
+      // Per-attempt join-failure emails are intentionally omitted: transient
+      // failures are counted and surfaced in the session summary instead of
+      // flooding the inbox (and burning the daily email budget).
 
       this.persistControlState();
       return false;
@@ -551,6 +563,31 @@ export class AdmiralEngine {
 
   private sessionKey(slot: ActiveSlot): string {
     return `${slot.courseId}@${slot.startedAt}`;
+  }
+
+  /** Wires the notification center. Call once after construction, before start(). */
+  attachNotificationCenter(center: NotificationCenter): void {
+    this.center = center;
+  }
+
+  /** Enqueues a session summary when the active slot changes or ends. */
+  private detectSlotEndForSummary(): void {
+    const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+    if (this.lastActiveSlotForSummary) {
+      const lastKey = this.sessionKey(this.lastActiveSlotForSummary);
+      if (lastKey !== currentKey) {
+        this.center.enqueue({ kind: "session_summary", slot: this.lastActiveSlotForSummary });
+      }
+    }
+    this.lastActiveSlotForSummary = this.activeSlot;
+  }
+
+  /** Recovers a missed summary if the worker restarted at a slot boundary. */
+  private recoverMissedSummary(): void {
+    const recent = getMostRecentEndedSlot(this.config);
+    if (!recent) return;
+    if (this.center.wasSummarySent(this.sessionKey(recent))) return;
+    this.center.enqueue({ kind: "session_summary", slot: recent });
   }
 
   /** Snapshots durable control state to SQLite so it survives restarts. */

@@ -78,6 +78,12 @@ export type HistoryEvent = {
   payload: Record<string, unknown> | null;
 };
 
+export type EmailBudgetSnapshot = {
+  emailsToday: number;
+  emailDailyCap: number;
+  suppressedToday: number;
+};
+
 export type StatusResponse = {
   state: AdmiralState;
   standdown: boolean;
@@ -97,4 +103,5 @@ export type StatusResponse = {
   bbbJoinUrl: string | null;
   joinBackoffActive: boolean;
   joinBackoffRemainingSeconds: number | null;
+  emailBudget: EmailBudgetSnapshot | null;
 };

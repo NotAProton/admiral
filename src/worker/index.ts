@@ -2,7 +2,7 @@ import "dotenv/config";
 import { openDatabase } from "../shared/db.js";
 import { AdmiralEngine } from "./engine.js";
 import { startInternalApi } from "./internalApi.js";
-import { configureNotifications } from "./notifications.js";
+import { NotificationCenter } from "./notifications.js";
 import { WorkerPersistence } from "./persistence.js";
 
 const configPath = process.env.SCHEDULE_CONFIG_PATH ?? "config/schedule.json";
@@ -12,9 +12,14 @@ const databasePath = process.env.DATABASE_PATH ?? "data/admiral.db";
 
 const db = openDatabase(databasePath);
 const persistence = new WorkerPersistence(db);
-configureNotifications(persistence);
 
 const engine = new AdmiralEngine(configPath, tickIntervalMs, persistence);
+engine.attachNotificationCenter(
+  new NotificationCenter({
+    persistence,
+    statusProvider: () => engine.getStatus()
+  })
+);
 await engine.start();
 
 const app = await startInternalApi(engine, internalPort);

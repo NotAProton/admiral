@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { ActiveSlot, HistoryEvent } from "../shared/types.js";
 
 export type PersistedWorkerState = {
@@ -25,7 +25,7 @@ export type AppendEventInput = {
 
 const EVENT_RETENTION_MS = 180 * 24 * 60 * 60 * 1000; // 180 days
 const EVENT_MAX_ROWS = 10_000;
-const EMAIL_LOG_RETENTION_MS = 24 * 60 * 60 * 1000; // rate-limit windows are <= 15 min; 24h is ample
+const EMAIL_LOG_RETENTION_MS = 45 * 24 * 60 * 60 * 1000; // 45 days — covers month-boundary queries for the monthly budget
 
 type WorkerStateRow = {
   standdown: number;
@@ -45,6 +45,56 @@ type EventRow = {
   class_name: string | null;
   payload_json: string | null;
 };
+
+export type OutboxRow = {
+  id: number;
+  createdMs: number;
+  notBeforeMs: number;
+  priority: number;
+  kind: string;
+  slotKey: string | null;
+  dedupeKey: string | null;
+  payload: Record<string, unknown>;
+  status: string;
+  attempts: number;
+  lastError: string | null;
+};
+
+type OutboxDbRow = {
+  id: number;
+  created_ms: number;
+  not_before_ms: number;
+  priority: number;
+  kind: string;
+  slot_key: string | null;
+  dedupe_key: string | null;
+  payload_json: string | null;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+};
+
+function outboxRowFromDb(row: OutboxDbRow): OutboxRow {
+  let payload: Record<string, unknown> = {};
+  try {
+    if (row.payload_json) payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  return {
+    id: row.id,
+    createdMs: row.created_ms,
+    notBeforeMs: row.not_before_ms,
+    priority: row.priority,
+    kind: row.kind,
+    slotKey: row.slot_key,
+    dedupeKey: row.dedupe_key,
+    payload,
+    status: row.status,
+    attempts: row.attempts,
+    lastError: row.last_error
+  };
+}
 
 function parseSlotJson(raw: string | null): ActiveSlot | null {
   if (!raw) return null;
@@ -188,6 +238,34 @@ export class WorkerPersistence {
     }));
   }
 
+  /** All events for a slot, oldest-first — used to render session summaries. */
+  listEventsForSlot(slotKey: string, limit: number): HistoryEvent[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM events WHERE slot_key = ? ORDER BY id ASC LIMIT ?"
+      )
+      .all(slotKey, limit) as unknown as EventRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      tsMs: row.ts_ms,
+      tsIso: new Date(row.ts_ms).toISOString(),
+      kind: row.kind,
+      slotKey: row.slot_key,
+      courseId: row.course_id,
+      className: row.class_name,
+      payload: parsePayloadJson(row.payload_json)
+    }));
+  }
+
+  /** Count of events of a kind since a cutoff — drives the suppressed-today counter. */
+  countEventsByKindSince(kind: string, sinceMs: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE kind = ? AND ts_ms >= ?")
+      .get(kind, sinceMs) as unknown as { n: number };
+    return row.n;
+  }
+
   // ── Email send ledger (drives notification rate limiting) ─────────────────
 
   recordEmail(kind: string, subject: string, tsMs: number): void {
@@ -197,10 +275,157 @@ export class WorkerPersistence {
     this.db.prepare("DELETE FROM email_log WHERE ts_ms < ?").run(tsMs - EMAIL_LOG_RETENTION_MS);
   }
 
+  /** Records an actual send with its dedupe key for audits and prefix queries. */
+  recordEmailWithDedupe(kind: string, subject: string, tsMs: number, dedupeKey: string | null): void {
+    this.db
+      .prepare("INSERT INTO email_log (ts_ms, kind, subject, dedupe_key) VALUES (?, ?, ?, ?)")
+      .run(tsMs, kind, subject, dedupeKey);
+    this.db.prepare("DELETE FROM email_log WHERE ts_ms < ?").run(tsMs - EMAIL_LOG_RETENTION_MS);
+  }
+
   countEmailsSince(sinceMs: number): number {
     const row = this.db
       .prepare("SELECT COUNT(*) AS n FROM email_log WHERE ts_ms >= ?")
       .get(sinceMs) as unknown as { n: number };
+    return row.n;
+  }
+
+  countEmailsBetween(fromMs: number, toMs: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM email_log WHERE ts_ms >= ? AND ts_ms < ?")
+      .get(fromMs, toMs) as unknown as { n: number };
+    return row.n;
+  }
+
+  countEmailsByKindPrefixSince(prefix: string, sinceMs: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM email_log WHERE dedupe_key LIKE ? AND ts_ms >= ?")
+      .get(`${prefix}%`, sinceMs) as unknown as { n: number };
+    return row.n;
+  }
+
+  // ── Notification outbox ───────────────────────────────────────────────────
+
+  enqueueOutbox(input: {
+    createdMs: number;
+    notBeforeMs: number;
+    priority: number;
+    kind: string;
+    slotKey: string | null;
+    dedupeKey: string | null;
+    payload: Record<string, unknown>;
+  }): number {
+    const info = this.db
+      .prepare(
+        `INSERT INTO email_outbox
+           (created_ms, not_before_ms, priority, kind, slot_key, dedupe_key, payload_json, status, attempts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0)`
+      )
+      .run(
+        input.createdMs,
+        input.notBeforeMs,
+        input.priority,
+        input.kind,
+        input.slotKey,
+        input.dedupeKey,
+        JSON.stringify(input.payload)
+      );
+    return Number(info.lastInsertRowid);
+  }
+
+  /** Pending rows whose settle window has elapsed, cheapest/most-urgent first. */
+  listOutboxDue(nowMs: number, limit: number): OutboxRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM email_outbox
+         WHERE status = 'pending' AND not_before_ms <= ?
+         ORDER BY priority ASC, not_before_ms ASC, id ASC
+         LIMIT ?`
+      )
+      .all(nowMs, limit) as unknown as OutboxDbRow[];
+    return rows.map(outboxRowFromDb);
+  }
+
+  listOutboxPendingForSlot(slotKey: string, kinds: string[]): OutboxRow[] {
+    if (kinds.length === 0) return [];
+    const placeholders = kinds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM email_outbox
+         WHERE status = 'pending' AND slot_key = ? AND kind IN (${placeholders})
+         ORDER BY id ASC`
+      )
+      .all(slotKey, ...kinds) as unknown as OutboxDbRow[];
+    return rows.map(outboxRowFromDb);
+  }
+
+  setOutboxStatus(
+    id: number,
+    status: string,
+    opts?: { lastError?: string | null; notBeforeMs?: number; attempts?: number }
+  ): void {
+    const sets: string[] = ["status = ?"];
+    const params: SQLInputValue[] = [status];
+    if (opts?.lastError !== undefined) {
+      sets.push("last_error = ?");
+      params.push(opts.lastError);
+    }
+    if (opts?.notBeforeMs !== undefined) {
+      sets.push("not_before_ms = ?");
+      params.push(opts.notBeforeMs);
+    }
+    if (opts?.attempts !== undefined) {
+      sets.push("attempts = ?");
+      params.push(opts.attempts);
+    }
+    params.push(id);
+    this.db.prepare(`UPDATE email_outbox SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+  }
+
+  /** Supersede: cancel earlier pending rows of a kind (latest-wins for acks). */
+  cancelPendingByKind(kind: string): number {
+    const info = this.db
+      .prepare(`UPDATE email_outbox SET status = 'cancelled' WHERE kind = ? AND status = 'pending'`)
+      .run(kind);
+    return Number(info.changes);
+  }
+
+  // ── Consumed dedupe keys (per-session caps across restarts) ───────────────
+
+  recordDedupe(key: string, tsMs: number): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO email_dedupe (dedupe_key, ts_ms) VALUES (?, ?)")
+      .run(key, tsMs);
+    this.db.prepare("DELETE FROM email_dedupe WHERE ts_ms < ?").run(tsMs - EMAIL_LOG_RETENTION_MS);
+  }
+
+  dedupeExists(key: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM email_dedupe WHERE dedupe_key = ?")
+      .get(key) as unknown as { hit: number } | undefined;
+    return row?.hit === 1;
+  }
+
+  countDedupeByPrefix(prefix: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM email_dedupe WHERE dedupe_key LIKE ?")
+      .get(`${prefix}%`) as unknown as { n: number };
+    return row.n;
+  }
+
+  pendingOutboxExists(dedupeKey: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 AS hit FROM email_outbox WHERE dedupe_key = ? AND status = 'pending'")
+      .get(dedupeKey) as unknown as { hit: number } | undefined;
+    return row?.hit === 1;
+  }
+
+  countPendingOutboxByPrefix(prefix: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM email_outbox WHERE dedupe_key LIKE ? AND status = 'pending'"
+      )
+      .get(`${prefix}%`) as unknown as { n: number };
     return row.n;
   }
 
