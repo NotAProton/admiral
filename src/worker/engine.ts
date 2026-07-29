@@ -305,18 +305,22 @@ export class AdmiralEngine {
       const duplicateConfirmed = this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes;
       const joinBackoffActive = Date.now() < this.joinBackoffUntilMs;
 
-      // Suppress the active slot signal when the session stand-down targets it.
+      // Session stand-down suppresses auto-join for a specific slot. It is
+      // passed as a separate gate signal (like backoff/duplicate) rather than
+      // by falsifying hasActiveSlot, so the state machine keeps a truthful
+      // picture of the schedule.
       const sessionSuppressed =
         this.activeSlot != null &&
         this.sessionStanddownSlot != null &&
         this.sessionKey(this.activeSlot) === this.sessionKey(this.sessionStanddownSlot);
 
       const transition = nextTransition(this.state, {
-        hasActiveSlot: this.activeSlot != null && !sessionSuppressed,
+        hasActiveSlot: this.activeSlot != null,
         heartbeatFresh,
         heartbeatMissing,
         duplicateConfirmed,
         standdown: this.standdown,
+        sessionSuppressed,
         forceJoin: this.forceJoinPending,
         forceLeave: this.forceLeavePending,
         joinCompleted: false,
@@ -332,11 +336,12 @@ export class AdmiralEngine {
 
         const joined = await this.performJoin(this.activeSlot);
         const follow = nextTransition("Joining", {
-          hasActiveSlot: this.activeSlot != null && !sessionSuppressed,
+          hasActiveSlot: this.activeSlot != null,
           heartbeatFresh,
           heartbeatMissing,
           duplicateConfirmed,
           standdown: this.standdown,
+          sessionSuppressed,
           forceJoin: false,
           forceLeave: this.forceLeavePending,
           joinCompleted: joined,
@@ -352,11 +357,12 @@ export class AdmiralEngine {
 
         const left = await this.performLeave();
         const follow = nextTransition("Leaving", {
-          hasActiveSlot: this.activeSlot != null && !sessionSuppressed,
+          hasActiveSlot: this.activeSlot != null,
           heartbeatFresh,
           heartbeatMissing,
           duplicateConfirmed,
           standdown: this.standdown,
+          sessionSuppressed,
           forceJoin: false,
           forceLeave: false,
           joinCompleted: false,

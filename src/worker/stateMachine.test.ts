@@ -9,6 +9,7 @@ function baseSignals(overrides: Partial<TickSignals> = {}): TickSignals {
     heartbeatMissing: true,
     duplicateConfirmed: false,
     standdown: false,
+    sessionSuppressed: false,
     forceJoin: false,
     forceLeave: false,
     joinCompleted: false,
@@ -126,4 +127,26 @@ test("Manual force leave overrides in-room state", () => {
   );
   assert.equal(transition.nextState, "Leaving");
   assert.equal(transition.shouldAttemptLeave, true);
+});
+
+test("Out shows 'Session stood down' when slot is suppressed by session standdown", () => {
+  // A stood-down slot still genuinely exists, so hasActiveSlot is true; the
+  // sessionSuppressed gate blocks the join and drives the reason.
+  const transition = nextTransition(
+    "Out",
+    baseSignals({ sessionSuppressed: true })
+  );
+  assert.equal(transition.nextState, "Out");
+  assert.equal(transition.shouldAttemptJoin, false);
+  assert.equal(transition.reason, "Session stood down");
+});
+
+test("InRoom leaves when its slot is stood down via session standdown", () => {
+  const transition = nextTransition(
+    "InRoom",
+    baseSignals({ sessionSuppressed: true })
+  );
+  assert.equal(transition.nextState, "Leaving");
+  assert.equal(transition.shouldAttemptLeave, true);
+  assert.equal(transition.reason, "Session stood down");
 });

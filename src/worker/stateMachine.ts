@@ -6,6 +6,7 @@ export type TickSignals = {
   heartbeatMissing: boolean;
   duplicateConfirmed: boolean;
   standdown: boolean;
+  sessionSuppressed: boolean;
   forceJoin: boolean;
   forceLeave: boolean;
   joinCompleted: boolean;
@@ -49,8 +50,16 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
   }
 
   if (current === "Out") {
+    // Session stand-down is a join gate, modelled like backoff and duplicate:
+    // the slot genuinely exists (hasActiveSlot stays truthful), we just refuse
+    // to auto-join for it.
     const joinAllowedBySignals =
-      s.hasActiveSlot && s.heartbeatMissing && !s.heartbeatFresh && !s.duplicateConfirmed && !s.joinBackoffActive;
+      s.hasActiveSlot &&
+      s.heartbeatMissing &&
+      !s.heartbeatFresh &&
+      !s.duplicateConfirmed &&
+      !s.joinBackoffActive &&
+      !s.sessionSuppressed;
     if (s.forceJoin || joinAllowedBySignals) {
       return {
         nextState: "Joining",
@@ -60,9 +69,15 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
       };
     }
 
+    // hasActiveSlot is truthful; a blocked join falls into this branch where the
+    // reason reflects *why* the join is being held off.
     let reason = "No active slot";
     if (s.hasActiveSlot) {
-      reason = s.joinBackoffActive ? "Backing off after repeated join failures" : "Heartbeat still fresh; holding off";
+      reason = s.sessionSuppressed
+        ? "Session stood down"
+        : s.joinBackoffActive
+          ? "Backing off after repeated join failures"
+          : "Heartbeat still fresh; holding off";
     }
 
     return {
@@ -92,10 +107,14 @@ export function nextTransition(current: AdmiralState, s: TickSignals): Transitio
   }
 
   if (current === "InRoom") {
-    if (!s.hasActiveSlot || s.duplicateConfirmed) {
+    if (!s.hasActiveSlot || s.duplicateConfirmed || s.sessionSuppressed) {
       return {
         nextState: "Leaving",
-        reason: s.duplicateConfirmed ? "Duplicate-name handoff confirmed" : "Slot ended",
+        reason: s.duplicateConfirmed
+          ? "Duplicate-name handoff confirmed"
+          : s.sessionSuppressed
+            ? "Session stood down"
+            : "Slot ended",
         shouldAttemptJoin: false,
         shouldAttemptLeave: true
       };
