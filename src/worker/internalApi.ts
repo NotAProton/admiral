@@ -11,6 +11,11 @@ const overrideSchema = z.object({
   action: z.enum(["force_join", "force_leave", "standdown_on", "standdown_off", "standdown_session", "standdown_session_cancel"])
 });
 
+const historyQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  before: z.coerce.number().int().positive().optional()
+});
+
 function writeSse(reply: FastifyReply, event: string, payload: StatusResponse): void {
   reply.raw.write(`event: ${event}\n`);
   reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -26,6 +31,14 @@ export async function startInternalApi(engine: AdmiralEngine, port: number): Pro
   app.get("/internal/status", async () => {
     return engine.getStatus();
   });
+
+  app.get(
+    "/internal/history",
+    async (request: FastifyRequest<{ Querystring: { limit?: string; before?: string } }>) => {
+      const query = historyQuerySchema.parse(request.query ?? {});
+      return { events: engine.getHistory(query.limit, query.before) };
+    }
+  );
 
   app.post("/internal/heartbeat", async (request: FastifyRequest<{ Body: HeartbeatPayload }>) => {
     const body = heartbeatSchema.parse(request.body);

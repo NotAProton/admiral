@@ -4,6 +4,8 @@ services:
     pull_policy: always
     env_file:
       - .env
+    volumes:
+      - admiral_data:/app/data
     restart: unless-stopped
     healthcheck:
       test:
@@ -46,3 +48,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  admiral_data:

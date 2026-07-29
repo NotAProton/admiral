@@ -5,6 +5,7 @@ import type {
   ActiveSlot,
   AdmiralConfig,
   AdmiralState,
+  HistoryEvent,
   OverrideAction,
   ParticipantSnapshot,
   SessionStanddown,
@@ -12,6 +13,7 @@ import type {
 } from "../shared/types.js";
 import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
+import type { WorkerPersistence } from "./persistence.js";
 import {
   sendJoinFailureEmail,
   sendJoinRetriesExhaustedEmail,
@@ -26,7 +28,7 @@ import { nextTransition } from "./stateMachine.js";
 
 export class AdmiralEngine {
   private readonly events = new EventEmitter();
-  private readonly heartbeat = new HeartbeatTracker();
+  private readonly heartbeat: HeartbeatTracker;
   private readonly bbb = new BbbSession();
 
   private config!: AdmiralConfig;
@@ -64,16 +66,65 @@ export class AdmiralEngine {
 
   constructor(
     private readonly configPath: string,
-    private readonly tickIntervalMs: number
+    private readonly tickIntervalMs: number,
+    private readonly persistence: WorkerPersistence
   ) {
     this.dryRun = envBoolean(process.env.DRY_RUN, false);
     this.headless = envBoolean(process.env.HEADLESS, true);
     this.postClickWaitMs = envNumber(process.env.POST_CLICK_WAIT_MS, 20_000);
+    // Hydrates the in-memory cache from SQLite; heartbeats stay fresh across restarts.
+    this.heartbeat = new HeartbeatTracker(persistence);
   }
 
   async start(): Promise<void> {
     this.config = await loadConfig(resolve(this.configPath));
-    this.reason = this.dryRun ? "Dry run mode enabled" : "Ready";
+
+    // Restore durable control state (standdowns, join backoff) from the database.
+    const persisted = this.persistence.loadWorkerState();
+    this.standdown = persisted.standdown;
+    this.sessionStanddownSlot = persisted.sessionStanddownSlot;
+    this.joinFailureStreak = persisted.joinFailureStreak;
+    this.joinBackoffUntilMs = persisted.joinBackoffUntilMs;
+    this.lastFailedSlotKey = persisted.lastFailedSlotKey;
+
+    // A room marker surviving to boot means the previous process died while
+    // in-room: the browser is gone, so reset to Out and record the recovery.
+    if (persisted.currentRoomSlot) {
+      this.persistence.appendEvent({
+        kind: "recovered_after_restart",
+        slot: persisted.currentRoomSlot,
+        payload: { note: "Process restarted while marked in-room; browser session lost. State reset to Out." }
+      });
+      this.currentRoomSlot = null;
+      this.persistControlState();
+    }
+
+    // If the persisted session stand-down targets a slot that is no longer
+    // active or upcoming, clear it immediately so the UI does not show a
+    // stale stand-down until the first tick runs the regular GC.
+    if (this.sessionStanddownSlot) {
+      const key = this.sessionKey(this.sessionStanddownSlot);
+      const now = getActiveSlot(this.config);
+      const upcoming = getUpcomingSlot(this.config);
+      const stillRelevant =
+        (now && this.sessionKey(now) === key) ||
+        (upcoming && this.sessionKey(upcoming) === key);
+      if (!stillRelevant) {
+        this.persistence.appendEvent({
+          kind: "session_standdown_cleared",
+          slot: this.sessionStanddownSlot,
+          payload: { reason: "targeted slot already passed at boot" }
+        });
+        this.sessionStanddownSlot = null;
+        this.persistControlState();
+      }
+    }
+
+    this.reason = this.dryRun
+      ? "Dry run mode enabled"
+      : this.standdown
+        ? "Standdown enabled (restored)"
+        : "Ready";
     this.emitStatus();
 
     this.ticker = setInterval(() => {
@@ -87,6 +138,12 @@ export class AdmiralEngine {
     if (this.ticker) clearInterval(this.ticker);
     this.ticker = null;
     await this.bbb.leave().catch(() => undefined);
+    // Clean shutdown: the room session is over, so clear the durable marker to
+    // avoid a spurious recovered_after_restart event on next boot.
+    if (this.currentRoomSlot) {
+      this.currentRoomSlot = null;
+      this.persistControlState();
+    }
   }
 
   recordHeartbeat(deviceId: string): void {
@@ -125,6 +182,11 @@ export class AdmiralEngine {
       const target = this.activeSlot ?? this.upcomingSlot;
       if (!target) {
         this.reason = "No active or upcoming session to stand down for";
+        this.persistence.appendEvent({
+          kind: "override",
+          payload: { action, rejected: "no active or upcoming session" }
+        });
+        this.persistControlState();
         this.emitStatus();
         return;
       }
@@ -152,6 +214,8 @@ export class AdmiralEngine {
       }
     }
 
+    this.persistence.appendEvent({ kind: "override", payload: { action } });
+    this.persistControlState();
     this.emitStatus();
   }
 
@@ -195,6 +259,10 @@ export class AdmiralEngine {
     return () => this.events.off("status", listener);
   }
 
+  getHistory(limit: number, beforeId?: number): HistoryEvent[] {
+    return this.persistence.listEvents(limit, beforeId);
+  }
+
   private emitStatus(): void {
     this.events.emit("status", this.getStatus());
   }
@@ -217,7 +285,13 @@ export class AdmiralEngine {
           (this.activeSlot && this.sessionKey(this.activeSlot) === key) ||
           (this.upcomingSlot && this.sessionKey(this.upcomingSlot) === key);
         if (!stillRelevant) {
+          this.persistence.appendEvent({
+            kind: "session_standdown_cleared",
+            slot: this.sessionStanddownSlot,
+            payload: { reason: "targeted slot has passed" }
+          });
           this.sessionStanddownSlot = null;
+          this.persistControlState();
         }
       }
 
@@ -272,7 +346,7 @@ export class AdmiralEngine {
 
         this.state = follow.nextState;
         this.reason = joined ? "Join completed" : "Join failed";
-      } else if (transition.shouldAttemptLeave && (this.state === "InRoom" || this.state === "Joining")) {
+      } else if (transition.shouldAttemptLeave && this.state !== "Out") {
         this.state = "Leaving";
         this.emitStatus();
 
@@ -292,6 +366,11 @@ export class AdmiralEngine {
 
         this.state = follow.nextState;
         if (left) {
+          this.persistence.appendEvent({
+            kind: "leave_success",
+            slot: this.currentRoomSlot,
+            payload: { trigger: transition.reason }
+          });
           await sendLeaveSuccessEmail(this.currentRoomSlot).catch((error) => {
             const message = error instanceof Error ? error.message : String(error);
             console.warn(`Leave-success email failed: ${message}`);
@@ -301,8 +380,14 @@ export class AdmiralEngine {
           this.duplicateStreak = 0;
           this.bbbJoinUrl = null;
           this.currentRoomSlot = null;
+          this.persistControlState();
           this.reason = "Left room";
         } else {
+          this.persistence.appendEvent({
+            kind: "leave_failed",
+            slot: this.currentRoomSlot,
+            payload: { reason: this.reason }
+          });
           this.reason = "Leave failed";
         }
       } else {
@@ -347,6 +432,8 @@ export class AdmiralEngine {
       // Reset failure tracking on a successful (dry-run) join.
       this.joinFailureStreak = 0;
       this.lastFailedSlotKey = null;
+      this.persistControlState();
+      this.persistence.appendEvent({ kind: "join_success", slot, payload: { dryRun: true } });
       return true;
     }
 
@@ -380,6 +467,8 @@ export class AdmiralEngine {
       // Successful join — clear failure tracking.
       this.joinFailureStreak = 0;
       this.lastFailedSlotKey = null;
+      this.persistControlState();
+      this.persistence.appendEvent({ kind: "join_success", slot });
 
       await sendJoinSuccessEmail(slot, resolved.joinUrl).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -391,6 +480,9 @@ export class AdmiralEngine {
       const message = error instanceof Error ? error.message : String(error);
       this.reason = `Join failed: ${message}`;
 
+      // Clear the stale join URL — the join did not complete.
+      this.bbbJoinUrl = null;
+
       // Track consecutive failures per slot and back off after the cap.
       const slotKey = this.sessionKey(slot);
       if (this.lastFailedSlotKey !== slotKey) {
@@ -400,11 +492,22 @@ export class AdmiralEngine {
         this.joinFailureStreak += 1;
       }
 
+      this.persistence.appendEvent({
+        kind: "join_failure",
+        slot,
+        payload: { error: message, streak: this.joinFailureStreak }
+      });
+
       if (this.joinFailureStreak >= AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES) {
         this.joinBackoffUntilMs = Date.now() + AdmiralEngine.JOIN_BACKOFF_MS;
         this.joinFailureStreak = 0;
         this.lastFailedSlotKey = null;
         const backoffMinutes = AdmiralEngine.JOIN_BACKOFF_MS / 60_000;
+        this.persistence.appendEvent({
+          kind: "join_backoff_start",
+          slot,
+          payload: { backoffMinutes, untilMs: this.joinBackoffUntilMs }
+        });
         await sendJoinRetriesExhaustedEmail(
           slot,
           AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES,
@@ -419,6 +522,7 @@ export class AdmiralEngine {
         });
       }
 
+      this.persistControlState();
       return false;
     }
   }
@@ -441,5 +545,17 @@ export class AdmiralEngine {
 
   private sessionKey(slot: ActiveSlot): string {
     return `${slot.courseId}@${slot.startedAt}`;
+  }
+
+  /** Snapshots durable control state to SQLite so it survives restarts. */
+  private persistControlState(): void {
+    this.persistence.saveWorkerState({
+      standdown: this.standdown,
+      sessionStanddownSlot: this.sessionStanddownSlot,
+      joinFailureStreak: this.joinFailureStreak,
+      joinBackoffUntilMs: this.joinBackoffUntilMs,
+      lastFailedSlotKey: this.lastFailedSlotKey,
+      currentRoomSlot: this.currentRoomSlot
+    });
   }
 }

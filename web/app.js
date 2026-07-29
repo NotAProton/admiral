@@ -15,6 +15,11 @@ const schedulePre = document.getElementById("schedulePre");
 const errorBanner = document.getElementById("errorBanner");
 const sessionStanddownPill = document.getElementById("sessionStanddownPill");
 const cancelSessionStanddownBtn = document.getElementById("cancelSessionStanddownBtn");
+const historyList = document.getElementById("historyList");
+const historyMoreBtn = document.getElementById("historyMoreBtn");
+
+let historyTimer = null;
+let historyOldestId = null;
 
 // ── Utility ────────────────────────────────────────────────────────────────
 
@@ -299,6 +304,102 @@ async function applyOverride(action, btn) {
   }
 }
 
+// ── History ────────────────────────────────────────────────────────────────
+
+const HISTORY_PAGE_SIZE = 50;
+
+const HISTORY_KIND_LABELS = {
+  join_success: "Joined",
+  join_failure: "Join failed",
+  join_backoff_start: "Backoff",
+  leave_success: "Left room",
+  leave_failed: "Leave failed",
+  override: "Override",
+  email_suppressed: "Email muted",
+  session_standdown_cleared: "Stand-down cleared",
+  recovered_after_restart: "Recovered"
+};
+
+function formatHistoryTime(tsMs) {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(tsMs));
+}
+
+function historyDetailText(event) {
+  const parts = [];
+  if (event.className) parts.push(event.className);
+  const p = event.payload;
+  if (p) {
+    if (p.action) parts.push(`action: ${p.action}`);
+    if (p.rejected) parts.push(`rejected: ${p.rejected}`);
+    if (p.trigger) parts.push(String(p.trigger));
+    if (p.error) parts.push(String(p.error));
+    if (p.reason) parts.push(String(p.reason));
+    if (p.note) parts.push(String(p.note));
+    if (p.dryRun) parts.push("(dry run)");
+  }
+  return parts.join(" — ");
+}
+
+function renderHistoryEvents(events, append) {
+  if (!append) historyList.innerHTML = "";
+  if (events.length === 0 && !append) {
+    historyList.innerHTML = '<div class="history-empty">No events yet.</div>';
+    return;
+  }
+  for (const event of events) {
+    const row = document.createElement("div");
+    row.className = "history-row";
+    const time = document.createElement("span");
+    time.className = "history-time";
+    time.textContent = formatHistoryTime(event.tsMs);
+    const kind = document.createElement("span");
+    kind.className = "history-kind";
+    kind.textContent = HISTORY_KIND_LABELS[event.kind] ?? event.kind;
+    const detail = document.createElement("span");
+    detail.className = "history-detail";
+    detail.textContent = historyDetailText(event);
+    row.append(time, kind, detail);
+    historyList.appendChild(row);
+  }
+}
+
+async function loadHistory(append = false) {
+  try {
+    const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+    if (append && historyOldestId != null) params.set("before", String(historyOldestId));
+    const data = await request(`/history?${params.toString()}`, { method: "GET", headers: {} });
+    const events = data.events ?? [];
+    if (!append) historyOldestId = null;
+    if (events.length > 0) {
+      historyOldestId = events[events.length - 1].id;
+      renderHistoryEvents(events, append);
+    } else if (!append) {
+      renderHistoryEvents([], false);
+    }
+    historyMoreBtn.classList.toggle("hidden", events.length < HISTORY_PAGE_SIZE);
+  } catch {
+    // handled in request (401 locks the UI)
+  }
+}
+
+function startHistoryLoop() {
+  if (historyTimer) clearInterval(historyTimer);
+  historyTimer = setInterval(() => {
+    if (document.visibilityState === "visible" && !appCard.classList.contains("hidden")) {
+      void loadHistory();
+    }
+  }, 60000);
+}
+
+historyMoreBtn.addEventListener("click", () => void loadHistory(true));
+
 // ── Login ──────────────────────────────────────────────────────────────────
 
 document.getElementById("loginForm").addEventListener("submit", async (event) => {
@@ -321,6 +422,8 @@ document.getElementById("loginForm").addEventListener("submit", async (event) =>
       connectEvents();
       startHeartbeatLoop();
       startCountdownLoop();
+      void loadHistory();
+      startHistoryLoop();
     } else if (res.status === 429) {
       showError("Too many login attempts. Please wait a few minutes.");
     } else {
@@ -396,3 +499,5 @@ void refreshStatus();
 connectEvents();
 startHeartbeatLoop();
 startCountdownLoop();
+void loadHistory();
+startHistoryLoop();

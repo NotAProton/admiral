@@ -4,6 +4,7 @@ dist/
 .env.*
 !.env.example
 .runtime/
+data/
 playwright-report/
 *.log
 npm-debug.log*
@@ -13,3 +14,4 @@ pnpm-debug.log*
 coverage/
 .DS_Store
 config/schedule.json
+context.md

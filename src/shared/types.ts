@@ -67,6 +67,17 @@ export type ActiveSlot = {
   endsAt: string;
 };
 
+export type HistoryEvent = {
+  id: number;
+  tsMs: number;
+  tsIso: string;
+  kind: string;
+  slotKey: string | null;
+  courseId: string | null;
+  className: string | null;
+  payload: Record<string, unknown> | null;
+};
+
 export type StatusResponse = {
   state: AdmiralState;
   standdown: boolean;

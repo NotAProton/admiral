@@ -1,16 +1,23 @@
 import type { ActiveSlot } from "../shared/types.js";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import type { WorkerPersistence } from "./persistence.js";
 
 const RATE_LIMIT_MAX_PER_MINUTE = 1;
 const RATE_LIMIT_MAX_PER_15_MINUTES = 5;
 const ONE_MINUTE_MS = 60 * 1000;
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
-const RATE_LIMIT_STATE_FILE = ".runtime/resend-rate-limit.json";
 
-type RateLimitState = {
-  sentAtMs: number[];
-};
+/**
+ * Sends are recorded in the SQLite email_log ledger, which keeps rate
+ * limiting accurate across worker restarts. The ledger is wired up via
+ * configureNotifications() at worker boot; until then an in-memory list is
+ * used so sending still works (and stays rate-limited) in tests and scripts.
+ */
+let persistence: WorkerPersistence | null = null;
+const fallbackSentAtMs: number[] = [];
+
+export function configureNotifications(store: WorkerPersistence): void {
+  persistence = store;
+}
 
 let rateLimitLock: Promise<void> = Promise.resolve();
 
@@ -29,44 +36,40 @@ async function withRateLimitLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function loadRateLimitState(): Promise<RateLimitState> {
-  try {
-    const raw = await readFile(RATE_LIMIT_STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw) as RateLimitState;
-    if (!Array.isArray(parsed.sentAtMs)) return { sentAtMs: [] };
-    return {
-      sentAtMs: parsed.sentAtMs.filter((value) => Number.isFinite(value))
-    };
-  } catch {
-    return { sentAtMs: [] };
-  }
-}
-
-async function saveRateLimitState(state: RateLimitState): Promise<void> {
-  await mkdir(dirname(RATE_LIMIT_STATE_FILE), { recursive: true });
-  await writeFile(RATE_LIMIT_STATE_FILE, JSON.stringify(state, null, 2), "utf8");
-}
-
-async function canSendAndRecordNow(nowMs: number): Promise<{ allowed: boolean; reason?: string }> {
+function canSendAndRecordNow(
+  kind: string,
+  subject: string,
+  nowMs: number
+): Promise<{ allowed: boolean; reason?: string }> {
   return withRateLimitLock(async () => {
-    const state = await loadRateLimitState();
+    if (persistence) {
+      const inLastMinute = persistence.countEmailsSince(nowMs - ONE_MINUTE_MS);
+      if (inLastMinute >= RATE_LIMIT_MAX_PER_MINUTE) {
+        return { allowed: false, reason: "per-minute limit reached" };
+      }
 
-    state.sentAtMs = state.sentAtMs.filter((ts) => nowMs - ts <= FIFTEEN_MINUTES_MS);
+      const inLast15Minutes = persistence.countEmailsSince(nowMs - FIFTEEN_MINUTES_MS);
+      if (inLast15Minutes >= RATE_LIMIT_MAX_PER_15_MINUTES) {
+        return { allowed: false, reason: "15-minute limit reached" };
+      }
 
-    const inLastMinute = state.sentAtMs.filter((ts) => nowMs - ts <= ONE_MINUTE_MS).length;
-    if (inLastMinute >= RATE_LIMIT_MAX_PER_MINUTE) {
-      await saveRateLimitState(state);
-      return { allowed: false, reason: "per-minute limit reached" };
+      persistence.recordEmail(kind, subject, nowMs);
+      return { allowed: true };
     }
 
-    const inLast15Minutes = state.sentAtMs.length;
-    if (inLast15Minutes >= RATE_LIMIT_MAX_PER_15_MINUTES) {
-      await saveRateLimitState(state);
+    // In-memory fallback until configureNotifications() runs (tests, scripts).
+    const recent = fallbackSentAtMs.filter((ts) => nowMs - ts <= FIFTEEN_MINUTES_MS);
+    fallbackSentAtMs.length = 0;
+    fallbackSentAtMs.push(...recent);
+
+    if (recent.filter((ts) => nowMs - ts <= ONE_MINUTE_MS).length >= RATE_LIMIT_MAX_PER_MINUTE) {
+      return { allowed: false, reason: "per-minute limit reached" };
+    }
+    if (fallbackSentAtMs.length >= RATE_LIMIT_MAX_PER_15_MINUTES) {
       return { allowed: false, reason: "15-minute limit reached" };
     }
 
-    state.sentAtMs.push(nowMs);
-    await saveRateLimitState(state);
+    fallbackSentAtMs.push(nowMs);
     return { allowed: true };
   });
 }
@@ -112,7 +115,7 @@ function footer(): string {
   return `\n-- \nAdmiral · ${domain}`;
 }
 
-async function sendResendEmail(subject: string, lines: string[]): Promise<void> {
+async function sendResendEmail(kind: string, subject: string, lines: string[]): Promise<void> {
   const resendKey = process.env.RESEND_API_KEY ?? "";
   const resendFrom = process.env.RESEND_FROM ?? "";
   const resendTo = process.env.RESEND_TO ?? "";
@@ -123,11 +126,15 @@ async function sendResendEmail(subject: string, lines: string[]): Promise<void> 
   }
 
   const nowMs = Date.now();
-  const limit = await canSendAndRecordNow(nowMs);
+  const limit = await canSendAndRecordNow(kind, subject, nowMs);
   if (!limit.allowed) {
     console.warn(
       `Notification email rate-limited (${limit.reason}). Limits: ${RATE_LIMIT_MAX_PER_MINUTE}/min and ${RATE_LIMIT_MAX_PER_15_MINUTES}/15min.`
     );
+    persistence?.appendEvent({
+      kind: "email_suppressed",
+      payload: { emailKind: kind, subject, reason: limit.reason ?? "rate limited" }
+    });
     return;
   }
 
@@ -166,7 +173,7 @@ export async function sendJoinSuccessEmail(slot: ActiveSlot, joinUrl: string): P
     ? `~${endsInMinutes} min remaining`
     : "slot has ended";
 
-  return sendResendEmail(`✓ Admiral in room — ${slot.className}`, [
+  return sendResendEmail("join_success", `✓ Admiral in room — ${slot.className}`, [
     `Admiral has joined the class and is holding your seat.`,
     "",
     `Class:       ${slot.className}`,
@@ -189,7 +196,7 @@ export async function sendJoinFailureEmail(slot: ActiveSlot, errorMessage: strin
     ? `~${endsInMinutes} min left in the slot — retrying automatically.`
     : `The slot has ended; no further retries for this session.`;
 
-  return sendResendEmail(`✗ Failed to join — ${slot.className} (${endsInMinutes > 0 ? `${endsInMinutes}m left` : "slot ended"})`, [
+  return sendResendEmail("join_failure", `✗ Failed to join — ${slot.className} (${endsInMinutes > 0 ? `${endsInMinutes}m left` : "slot ended"})`, [
     `Admiral could not join the class.`,
     "",
     `Class:     ${slot.className}`,
@@ -223,12 +230,12 @@ export async function sendLeaveSuccessEmail(slot: ActiveSlot | null): Promise<vo
   lines.push(footer());
 
   const subject = slot ? `← Admiral left — ${slot.className}` : "← Admiral left the meeting room";
-  return sendResendEmail(subject, lines);
+  return sendResendEmail("leave_success", subject, lines);
 }
 
 export async function sendStanddownEmail(active: boolean): Promise<void> {
   if (active) {
-    return sendResendEmail(`⏸ Standdown ON — Admiral will not auto-join`, [
+    return sendResendEmail("standdown", `⏸ Standdown ON — Admiral will not auto-join`, [
       `Global standdown has been enabled. Admiral will not join any class until you turn it off.`,
       "",
       `All scheduled sessions will be skipped until standdown is lifted.`,
@@ -239,7 +246,7 @@ export async function sendStanddownEmail(active: boolean): Promise<void> {
     ]);
   }
 
-  return sendResendEmail(`▶ Standdown OFF — auto-join resumed`, [
+  return sendResendEmail("standdown", `▶ Standdown OFF — auto-join resumed`, [
     `Global standdown has been disabled. Admiral will resume joining classes on schedule.`,
     "",
     `Disabled at: ${nowIstLabel()}`,
@@ -258,7 +265,7 @@ export async function sendSessionStanddownEmail(slot: ActiveSlot, cancelled: boo
       ? `Slot starts in ~${startsInMinutes} min.`
       : `Slot is currently active.`;
 
-    return sendResendEmail(`↩ Stand-down cancelled — ${slot.className}`, [
+    return sendResendEmail("session_standdown", `↩ Stand-down cancelled — ${slot.className}`, [
       `The per-session stand-down has been cancelled. Admiral will auto-join this session normally.`,
       "",
       `Class:   ${slot.className}`,
@@ -276,7 +283,7 @@ export async function sendSessionStanddownEmail(slot: ActiveSlot, cancelled: boo
     ? `Slot starts in ~${startsInMinutes} min.`
     : `Slot is currently active — Admiral is leaving the room now.`;
 
-  return sendResendEmail(`⏭ Skipping this session — ${slot.className} at ${slotStart}`, [
+  return sendResendEmail("session_standdown", `⏭ Skipping this session — ${slot.className} at ${slotStart}`, [
     `Admiral will sit out this session. Auto-join resumes from the next class onwards.`,
     "",
     `Class:  ${slot.className}`,
@@ -304,6 +311,7 @@ export async function sendJoinRetriesExhaustedEmail(
     : `The slot has already ended; no further auto-join attempts for this session.`;
 
   return sendResendEmail(
+    "join_retries_exhausted",
     `⚠ ${failureCount} join failures — backing off ${backoffMinutes}m (${slot.className})`,
     [
       `Admiral hit ${failureCount} consecutive join failures and has entered a ${backoffMinutes}-minute backoff.`,

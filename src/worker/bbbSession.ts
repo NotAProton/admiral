@@ -84,6 +84,17 @@ export class BbbSession {
     await this.trySelectListenOnly();
     await this.page.waitForTimeout(5_000);
     await this.openUserListPanel();
+
+    // Verify we actually landed in a BBB room.  A silent join failure
+    // (e.g. button click swallowed, redirect loop) would otherwise leave
+    // the engine thinking it is InRoom when it is not.
+    const currentUrl = this.page.url();
+    if (!currentUrl.includes("html5client") && !currentUrl.includes("bigbluebutton")) {
+      throw new Error(
+        `Does not appear to be inside a BBB room after join attempt.  ` +
+        `Current URL: ${currentUrl}`
+      );
+    }
   }
 
   async scrapeParticipants(targetDisplayName: string): Promise<ParticipantSnapshot> {

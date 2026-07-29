@@ -78,7 +78,7 @@ export async function resolveJoinUrl(input: ResolveJoinInput): Promise<{ joinUrl
 
   const browser = await chromium.launch({
     headless: input.headless,
-    args: ["--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required"]
+    args: ["--use-fake-ui-for-media-stream", "--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"]
   });
 
   const context = await browser.newContext({

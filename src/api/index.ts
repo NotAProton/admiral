@@ -134,6 +134,13 @@ app.get("/status", async () => {
   return res.json();
 });
 
+app.get("/history", async (request) => {
+  const queryIndex = request.url.indexOf("?");
+  const query = queryIndex >= 0 ? request.url.slice(queryIndex) : "";
+  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/history${query}`);
+  return res.json();
+});
+
 app.post("/heartbeat", async (request, reply) => {
   const body = heartbeatSchema.parse(request.body);
   const res = await fetch(`http://127.0.0.1:${internalPort}/internal/heartbeat`, {

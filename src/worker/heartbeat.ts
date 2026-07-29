@@ -1,16 +1,31 @@
+import type { WorkerPersistence } from "./persistence.js";
+
 type DeviceHeartbeat = {
   deviceId: string;
   lastSeenMs: number;
 };
 
+/**
+ * In-memory heartbeat cache, write-through to SQLite when persistence is
+ * provided. The database copy lets heartbeat freshness survive worker
+ * restarts, so the bot does not auto-join right after a restart while the
+ * user is actually present.
+ */
 export class HeartbeatTracker {
   private readonly byDevice = new Map<string, DeviceHeartbeat>();
 
+  constructor(private readonly persistence: WorkerPersistence | null = null) {
+    if (this.persistence) {
+      for (const hb of this.persistence.loadHeartbeats()) {
+        this.byDevice.set(hb.deviceId, hb);
+      }
+    }
+  }
+
   record(deviceId: string): void {
-    this.byDevice.set(deviceId, {
-      deviceId,
-      lastSeenMs: Date.now()
-    });
+    const lastSeenMs = Date.now();
+    this.byDevice.set(deviceId, { deviceId, lastSeenMs });
+    this.persistence?.recordHeartbeat(deviceId, lastSeenMs);
   }
 
   getNewestAgeSeconds(nowMs = Date.now()): number | null {
@@ -30,5 +45,6 @@ export class HeartbeatTracker {
         this.byDevice.delete(deviceId);
       }
     }
+    this.persistence?.pruneHeartbeatsBefore(nowMs - maxAgeMs);
   }
 }
