@@ -67,6 +67,14 @@ async function sendAlert(message: string): Promise<void> {
   }
 }
 
+function istLabel(epochMs: number): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    dateStyle: "full",
+    timeStyle: "long"
+  }).format(new Date(epochMs));
+}
+
 async function main(): Promise<void> {
   const ok = await healthOk();
   if (ok) {
@@ -83,7 +91,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const msg = `Admiral health check failed at ${new Date(nowMs).toISOString()} for ${healthUrl}`;
+  const msg = `Admiral health check failed at ${istLabel(nowMs)} for ${healthUrl}`;
   await sendAlert(msg);
 
   await mkdir(dirname(stateFile), { recursive: true });

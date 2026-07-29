@@ -1,6 +1,15 @@
 import type { ActiveSlot, AdmiralConfig, CourseConfig, DayName } from "../shared/types.js";
 
 const ADMIRAL_TIMEZONE = "Asia/Kolkata";
+// Asia/Kolkata has no daylight-saving shifts, so a fixed offset is safe.
+// Emitted timestamps must carry this offset: a naive "YYYY-MM-DDTHH:MM:SS"
+// string is parsed by `new Date()` in the *host* timezone (UTC in our
+// container), which silently shifted every email/dashboard time by +5:30.
+const IST_OFFSET = "+05:30";
+
+function istIso(datePrefix: string, hhmm: string): string {
+  return `${datePrefix}T${hhmm}:00${IST_OFFSET}`;
+}
 
 const dayMap: Record<string, DayName> = {
   Mon: "Mon",
@@ -46,7 +55,7 @@ function nowInIst(): { day: DayName; minutes: number; iso: string } {
   const day = dayMap[values.weekday];
   const hour = Number(values.hour);
   const minute = Number(values.minute);
-  const iso = `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}:00`;
+  const iso = `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}:00${IST_OFFSET}`;
 
   if (!day) {
     throw new Error(`Unsupported weekday from Intl formatter: ${values.weekday}`);
@@ -74,8 +83,8 @@ function maybeActiveCourse(course: CourseConfig, day: DayName, nowMinutes: numbe
       classPageUrl: course.classPageUrl,
       joinLinkText: course.joinLinkText,
       myDisplayName: course.myDisplayName,
-      startedAt: `${datePrefix}T${slot.start}:00`,
-      endsAt: `${datePrefix}T${slot.end}:00`
+      startedAt: istIso(datePrefix, slot.start),
+      endsAt: istIso(datePrefix, slot.end)
     };
   }
 
@@ -121,8 +130,8 @@ export function getUpcomingSlot(config: AdmiralConfig): ActiveSlot | null {
           classPageUrl: course.classPageUrl,
           joinLinkText: course.joinLinkText,
           myDisplayName: course.myDisplayName,
-          startedAt: `${datePrefix}T${weeklySlot.start}:00`,
-          endsAt: `${datePrefix}T${weeklySlot.end}:00`
+          startedAt: istIso(datePrefix, weeklySlot.start),
+          endsAt: istIso(datePrefix, weeklySlot.end)
         };
 
         if (!best || deltaMinutes < best.deltaMinutes) {

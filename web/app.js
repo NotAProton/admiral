@@ -301,7 +301,8 @@ async function applyOverride(action, btn) {
 
 // ── Login ──────────────────────────────────────────────────────────────────
 
-document.getElementById("loginBtn").addEventListener("click", async () => {
+document.getElementById("loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
   const token = tokenInput.value.trim();
   if (!token) return;
 

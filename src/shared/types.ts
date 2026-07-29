@@ -61,7 +61,9 @@ export type ActiveSlot = {
   classPageUrl: string;
   joinLinkText: string;
   myDisplayName: string;
+  /** IST wall clock with explicit offset, e.g. "2026-07-29T09:00:00+05:30" — safe for `new Date()` on any host timezone. */
   startedAt: string;
+  /** IST wall clock with explicit offset, e.g. "2026-07-29T10:00:00+05:30". */
   endsAt: string;
 };
 

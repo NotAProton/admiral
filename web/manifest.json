@@ -3,7 +3,7 @@
   "short_name": "Admiral",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f9f5e8",
-  "theme_color": "#f9f5e8",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
   "icons": []
 }

@@ -3,158 +3,259 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f9f5e8" />
+    <meta name="theme-color" content="#000000" />
     <title>Admiral</title>
     <link rel="manifest" href="/manifest.json" />
     <style>
+      /* ── Palette: white, black, accent #1c1c84. Nothing else. ── */
       :root {
-        --bg: #f9f5e8;
-        --card: #fff9ee;
-        --ink: #1d2418;
-        --muted: #5b644f;
-        --ok: #2f8f46;
-        --warn: #c57e13;
-        --danger: #bf2f2f;
+        --bg: #ffffff;
+        --ink: #000000;
+        --accent: #1c1c84;
+        /* legacy tokens consumed by app.js inline state colors */
+        --muted: #000000;
+        --ok: #1c1c84;
+        --warn: #1c1c84;
+        --danger: #000000;
       }
-      * { box-sizing: border-box; }
+
+      * {
+        box-sizing: border-box;
+        border-radius: 0 !important; /* sharp corners, enforced globally */
+      }
+
+      ::selection { background: var(--accent); color: #ffffff; }
+
       body {
         margin: 0;
-        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 14px;
+        line-height: 1.5;
         color: var(--ink);
-        background:
-          radial-gradient(circle at 10% 10%, #fffef6 0, transparent 30%),
-          radial-gradient(circle at 90% 20%, #ffeec9 0, transparent 40%),
-          var(--bg);
+        background: var(--bg);
         min-height: 100vh;
-        padding: 24px;
       }
+
+      /* ── Top bar ── */
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        background: var(--ink);
+        color: #ffffff;
+        padding: 12px 20px;
+        border-bottom: 4px solid var(--accent);
+      }
+      .brand {
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+      }
+      .brand::before { content: "■"; color: var(--accent); margin-right: 10px; }
+      .brand-sub {
+        margin-left: 14px;
+        font-size: 11px;
+        font-weight: 400;
+        letter-spacing: 1px;
+        opacity: 0.65;
+        text-transform: uppercase;
+      }
+
+      /* ── Layout ── */
       .shell {
-        max-width: 920px;
+        max-width: 960px;
         margin: 0 auto;
+        padding: 24px 20px 48px;
         display: grid;
         gap: 16px;
       }
-      .card {
-        background: var(--card);
-        border: 1px solid #e8d9bc;
-        border-radius: 16px;
+      .app { display: grid; gap: 16px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      .hidden { display: none !important; }
+      .muted { opacity: 0.6; font-size: 12px; }
+      .hint { margin-top: 10px; font-size: 12px; opacity: 0.6; }
+
+      /* ── Panels ── */
+      .panel {
+        background: var(--bg);
+        border: 2px solid var(--ink);
         padding: 16px;
-        box-shadow: 0 8px 20px rgba(94, 71, 31, 0.08);
       }
-      .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-      h1 { margin: 0; font-size: 28px; letter-spacing: 0.4px; }
-      .muted { color: var(--muted); }
-      .pill {
-        padding: 6px 10px;
-        border-radius: 999px;
-        border: 1px solid #d4c5a6;
-        background: #fff;
-        font-size: 13px;
+      .panel-title {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--ink);
+        padding-bottom: 8px;
+        margin-bottom: 12px;
       }
-      .ok { color: var(--ok); }
-      .warn { color: var(--warn); }
-      .danger { color: var(--danger); }
+      .panel-title::before { content: "■"; color: var(--accent); margin-right: 8px; }
+
+      /* ── Login ── */
+      #loginCard { max-width: 560px; width: 100%; justify-self: center; margin-top: 48px; }
+
+      /* ── Buttons ── */
       button {
-        border: 0;
-        border-radius: 10px;
-        padding: 10px 14px;
-        background: #3a5f22;
-        color: #fff;
+        font: inherit;
+        font-weight: 700;
+        font-size: 12px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        padding: 10px 16px;
         cursor: pointer;
-        font-weight: 600;
+        color: #ffffff;
+        background: var(--accent);
+        border: 2px solid var(--accent);
       }
-      button.secondary { background: #5d6f47; }
-      button.danger { background: #922a2a; }
+      button:hover:not(:disabled) { background: var(--ink); border-color: var(--ink); }
+      button.secondary { background: var(--bg); color: var(--ink); border-color: var(--ink); }
+      button.secondary:hover:not(:disabled) { background: var(--ink); color: #ffffff; }
+      button.danger { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+      button.danger:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+      button:disabled { opacity: 0.35; cursor: not-allowed; }
+      button.busy { opacity: 0.6; cursor: wait; }
+      button:focus-visible,
+      input:focus-visible,
+      summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
       input {
-        border: 1px solid #ccb993;
-        border-radius: 10px;
-        padding: 10px;
+        font: inherit;
+        padding: 10px 12px;
         width: 280px;
+        max-width: 100%;
+        color: var(--ink);
+        background: var(--bg);
+        border: 2px solid var(--ink);
       }
-      pre {
-        background: #fff;
-        border: 1px solid #e8d9bc;
-        border-radius: 12px;
-        padding: 12px;
-        margin: 0;
-        overflow: auto;
-        max-height: 320px;
+      input:focus { border-color: var(--accent); outline: none; }
+      input::placeholder { color: var(--ink); opacity: 0.45; letter-spacing: 1px; }
+
+      /* ── Tags / pills (square) ── */
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 10px;
+        font-size: 11px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        background: var(--bg);
+        color: var(--ink);
+        border: 1px solid var(--ink);
       }
-      button:disabled { opacity: 0.55; cursor: not-allowed; }
-      button.busy { opacity: 0.75; cursor: wait; }
-      .error-banner {
-        background: #fdecea;
-        border: 1px solid #f5a7a7;
-        border-radius: 10px;
-        color: var(--danger);
-        padding: 10px 14px;
-        font-size: 13px;
-        display: none;
-      }
+      .pill.ok { border-color: var(--accent); color: var(--accent); }
+      .pill.warn { background: var(--ink); color: #ffffff; border-color: var(--ink); }
+
+      /* heartbeat pill sits on the black topbar */
+      .topbar .pill { border-color: #ffffff; color: #ffffff; background: transparent; }
+      .topbar .pill.ok { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+      .topbar .pill.warn { background: #ffffff; color: var(--ink); border-color: #ffffff; }
+
       .session-standdown-pill {
-        background: #fff3cd;
-        border: 1px solid #f0c040;
-        border-radius: 999px;
-        padding: 6px 12px;
-        font-size: 13px;
-        color: #7a5c00;
         display: none;
         align-items: center;
         gap: 8px;
+        padding: 5px 10px;
+        font-size: 11px;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        background: var(--accent);
+        color: #ffffff;
+        border: 1px solid var(--accent);
       }
+
+      /* ── Status grid ── */
       .status-summary {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 10px;
-        margin-bottom: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
       }
-      .stat-box {
-        background: #fff;
-        border: 1px solid #e8d9bc;
-        border-radius: 12px;
+      .stat-box { background: var(--bg); border: 2px solid var(--ink); padding: 12px 14px; }
+      .stat-box .label {
+        font-size: 10px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        opacity: 0.6;
+        margin-bottom: 4px;
+      }
+      .stat-box .value {
+        font-size: 20px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        word-break: break-word;
+      }
+      .stat-box .sub { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+
+      /* ── Error banner ── */
+      .error-banner {
+        display: none;
+        background: var(--ink);
+        color: #ffffff;
+        border-left: 6px solid var(--accent);
         padding: 10px 14px;
+        font-size: 12px;
+        letter-spacing: 0.5px;
       }
-      .stat-box .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-      .stat-box .value { font-size: 18px; font-weight: 700; }
-      .stat-box .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-      details > summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 10px 0 6px; }
+
+      /* ── Raw JSON ── */
+      details.panel { padding: 0; }
+      details.panel > summary {
+        cursor: pointer;
+        padding: 12px 16px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        list-style: none;
+      }
+      details.panel > summary::-webkit-details-marker { display: none; }
+      details.panel > summary::before { content: "+"; color: var(--accent); margin-right: 8px; }
+      details[open].panel > summary::before { content: "–"; }
+      details.panel > summary:hover { color: var(--accent); }
+      .raw-body { padding: 0 16px 16px; }
+      pre {
+        background: var(--bg);
+        border: 1px solid var(--ink);
+        padding: 12px;
+        margin: 0 0 12px;
+        overflow: auto;
+        max-height: 320px;
+        font-size: 12px;
+        font-family: inherit;
+      }
+
+      .footer-row { justify-content: flex-end; }
+
+      @media (max-width: 640px) {
+        .shell { padding: 16px 12px 40px; }
+        input { width: 100%; }
+        .brand-sub { display: block; margin-left: 0; margin-top: 2px; }
+      }
     </style>
   </head>
   <body>
-    <div class="shell">
-      <div class="card row" style="justify-content: space-between">
-        <div>
-          <h1>Admiral</h1>
-          <div class="muted">Presence handoff controller</div>
-        </div>
-        <div id="hbState" class="pill">Heartbeat: unknown</div>
-      </div>
+    <header class="topbar">
+      <div class="brand">Admiral<span class="brand-sub">Presence handoff controller</span></div>
+      <div id="hbState" class="pill">Heartbeat: unknown</div>
+    </header>
 
-      <div id="loginCard" class="card">
-        <div class="row">
-          <input id="tokenInput" type="password" placeholder="Access token" />
-          <button id="loginBtn">Unlock</button>
-        </div>
-        <div class="muted" style="margin-top: 8px">Token is exchanged for an HttpOnly session cookie.</div>
-      </div>
+    <main class="shell">
+      <section id="loginCard" class="panel">
+        <div class="panel-title">Authentication</div>
+        <form id="loginForm" class="row">
+          <input id="tokenInput" type="password" placeholder="Access token" autocomplete="current-password" />
+          <button id="loginBtn" type="submit">Unlock</button>
+        </form>
+        <div class="hint">Token is exchanged for an HttpOnly session cookie.</div>
+      </section>
 
-      <div id="appCard" class="card hidden">
-        <div id="errorBanner" class="error-banner" style="margin-bottom: 10px"></div>
-        <div class="row" style="margin-bottom: 10px; flex-wrap: wrap">
-          <button id="joinBtn">Force Join</button>
-          <button id="leaveBtn" class="danger">Force Leave</button>
-          <button id="standdownOnBtn" class="secondary">Standdown On</button>
-          <button id="standdownOffBtn" class="secondary">Standdown Off</button>
-          <button id="standdownSessionBtn" class="secondary">Stand Down This Session</button>
-          <button id="cancelSessionStanddownBtn" class="secondary hidden">Cancel Session Stand-Down</button>
-          <button id="openJoinBtn" class="secondary">Join Myself</button>
-          <button id="logoutBtn" class="secondary" style="margin-left: auto">Log Out</button>
-        </div>
-        <div class="row" style="margin-bottom: 12px; flex-wrap: wrap; gap: 8px">
-          <div id="siteTime" class="pill">IST time: --</div>
-          <div id="upcomingClass" class="pill">Upcoming: --</div>
-          <div id="sessionStanddownPill" class="session-standdown-pill"></div>
-        </div>
+      <section id="appCard" class="app hidden">
+        <div id="errorBanner" class="error-banner" role="alert"></div>
+
         <div class="status-summary">
           <div class="stat-box">
             <div class="label">State</div>
@@ -177,14 +278,48 @@
             <div class="sub" id="statCountdownClass"></div>
           </div>
         </div>
-        <details>
+
+        <div class="row">
+          <div id="siteTime" class="pill">IST time: --</div>
+          <div id="upcomingClass" class="pill">Upcoming: --</div>
+          <div id="sessionStanddownPill" class="session-standdown-pill"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Presence control</div>
+          <div class="row">
+            <button id="joinBtn">Force Join</button>
+            <button id="leaveBtn" class="danger">Force Leave</button>
+            <button id="openJoinBtn" class="secondary">Join Myself</button>
+          </div>
+          <div class="hint">Force Join / Force Leave override the worker for the current class. Join Myself opens the live room in a new tab.</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Standdown</div>
+          <div class="row">
+            <button id="standdownOnBtn" class="secondary">Standdown On</button>
+            <button id="standdownOffBtn" class="secondary">Standdown Off</button>
+            <button id="standdownSessionBtn" class="secondary">Stand Down This Session</button>
+            <button id="cancelSessionStanddownBtn" class="secondary hidden">Cancel Session Stand-Down</button>
+          </div>
+          <div class="hint">Standdown stops Admiral from auto-joining. Global applies until turned off; session applies to one class only.</div>
+        </div>
+
+        <details class="panel">
           <summary>Raw status &amp; schedule JSON</summary>
-          <pre id="statusPre">Loading...</pre>
-          <div class="muted" style="margin-top: 8px; margin-bottom: 4px">Parsed schedule</div>
-          <pre id="schedulePre">Loading...</pre>
+          <div class="raw-body">
+            <pre id="statusPre">Loading...</pre>
+            <div class="muted" style="margin-bottom: 4px">Parsed schedule</div>
+            <pre id="schedulePre">Loading...</pre>
+          </div>
         </details>
-      </div>
-    </div>
+
+        <div class="row footer-row">
+          <button id="logoutBtn" class="secondary">Log Out</button>
+        </div>
+      </section>
+    </main>
 
     <script src="/app.js" type="module"></script>
   </body>
