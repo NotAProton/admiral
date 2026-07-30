@@ -6,8 +6,10 @@ import type {
   ActiveSlot,
   AdmiralConfig,
   AdmiralState,
+  CourseConfig,
   HistoryEvent,
   OverrideAction,
+  ParticipantSample,
   ParticipantSnapshot,
   SessionStanddown,
   StatusResponse
@@ -16,10 +18,12 @@ import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
 import type { WorkerPersistence } from "./persistence.js";
 import { NotificationCenter } from "./notifications.js";
-import { getActiveSlot, getCurrentIstIso, getMostRecentEndedSlot, getUpcomingSlot } from "./schedule.js";
+import { getActiveSlot, getCurrentIstDay, getCurrentIstIso, getMostRecentEndedSlot, getUpcomingSlot } from "./schedule.js";
 import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { nextTransition } from "./stateMachine.js";
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class AdmiralEngine {
   private readonly events = new EventEmitter();
@@ -36,7 +40,7 @@ export class AdmiralEngine {
 
   private activeSlot: ActiveSlot | null = null;
   private upcomingSlot: ActiveSlot | null = null;
-  private participantSnapshot: ParticipantSnapshot = { count: 0, names: [], nameExactMatchCount: 0 };
+  private participantSnapshot: ParticipantSnapshot = { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
   private duplicateStreak = 0;
   private lastScrapeAtMs = 0;
   private bbbJoinUrl: string | null = null;
@@ -76,6 +80,43 @@ export class AdmiralEngine {
   private joinFailureStreak = 0;
   private joinBackoffUntilMs = 0;
   private lastFailedSlotKey: string | null = null;
+
+  // ── Room watch (empty-room detection + room sweep) ───────────────────────
+  // Added after the 2026-07-30 stale-schedule incident, where the bot sat
+  // alone in an empty room for hours, silently. Admiral now watches the
+  // headcount of whatever room it is in; if it stays below
+  // ROOM_MIN_PARTICIPANTS past a grace+confirm window, it leaves and probes
+  // the other configured course rooms ("sweep"), adopting the first one with
+  // enough people — mirroring what the user does by hand. If no room
+  // qualifies, it rejoins the scheduled room (attendance-safe) and re-sweeps
+  // on a timer until the slot ends.
+  private static readonly ROOM_WATCH_ENABLED = envBoolean(process.env.EMPTY_ROOM_DETECTION_ENABLED, true);
+  // Headcount includes Admiral itself: alone in a room reads 1.
+  private static readonly ROOM_MIN_PARTICIPANTS = envNumber(process.env.EMPTY_ROOM_MIN_PARTICIPANTS, 3);
+  private static readonly ROOM_EMPTY_GRACE_MS = envNumber(process.env.EMPTY_ROOM_GRACE_SECONDS, 300) * 1000;
+  private static readonly ROOM_EMPTY_CONFIRM_MS = envNumber(process.env.EMPTY_ROOM_CONFIRM_SECONDS, 300) * 1000;
+  private static readonly ROOM_SWEEP_RETRY_MS = envNumber(process.env.ROOM_SWEEP_RETRY_SECONDS, 900) * 1000;
+  private static readonly ROOM_SWEEP_MAX_PER_SLOT = envNumber(process.env.ROOM_SWEEP_MAX_PER_SLOT, 6);
+  private static readonly ROOM_SWEEP_PROBE_SETTLE_MS = envNumber(process.env.ROOM_SWEEP_PROBE_SETTLE_SECONDS, 25) * 1000;
+  private static readonly SCRAPE_FAIL_LEAVE_THRESHOLD = 3;
+
+  private roomEnteredAtMs = 0;
+  private belowThresholdSinceMs: number | null = null;
+  private scrapeFailStreak = 0;
+  private scrapeFailRejoins = 0;
+  private scrapeDeadRoomPending = false;
+  private roomSweepPending = false;
+  private sweepsThisSlot = 0;
+  private sweepOriginSlotKey: string | null = null;
+  private sweepHaltedForSlot = false;
+  private nextRoomSweepAtMs: number | null = null;
+  private adoptedFromSlotKey: string | null = null;
+  private adoptedFromClassName: string | null = null;
+  private lastEvaluatedScrapeAtMs = 0;
+
+  // ── Participant-count sampling (drives /participant-stats) ───────────────
+  private static readonly PARTICIPANT_SAMPLE_MS = envNumber(process.env.PARTICIPANT_SAMPLE_SECONDS, 300) * 1000;
+  private lastSampleAtMs = 0;
 
   private ticker: NodeJS.Timeout | null = null;
   private tickInFlight = false;
@@ -294,6 +335,24 @@ export class AdmiralEngine {
       schedule: this.config,
       participantCount: this.participantSnapshot.count,
       participantNames: this.participantSnapshot.names,
+      currentRoom: this.currentRoomSlot
+        ? {
+            courseId: this.currentRoomSlot.courseId,
+            className: this.currentRoomSlot.className,
+            adopted: this.adoptedFromSlotKey != null,
+            adoptedFromClassName: this.adoptedFromClassName,
+            enteredAt: this.roomEnteredAtMs > 0 ? new Date(this.roomEnteredAtMs).toISOString() : null
+          }
+        : null,
+      roomWatch: {
+        enabled: AdmiralEngine.ROOM_WATCH_ENABLED,
+        minParticipants: AdmiralEngine.ROOM_MIN_PARTICIPANTS,
+        scrapeOk: this.participantSnapshot.scrapeOk,
+        belowThresholdSince: this.belowThresholdSinceMs != null ? new Date(this.belowThresholdSinceMs).toISOString() : null,
+        sweepsThisSlot: this.sweepsThisSlot,
+        maxSweepsPerSlot: AdmiralEngine.ROOM_SWEEP_MAX_PER_SLOT,
+        nextSweepRetryAt: this.nextRoomSweepAtMs != null ? new Date(this.nextRoomSweepAtMs).toISOString() : null
+      },
       duplicateConfirmed: this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes,
       duplicateStreak: this.duplicateStreak,
       lastHeartbeatAgeSeconds: heartbeatAge,
@@ -316,6 +375,24 @@ export class AdmiralEngine {
 
   getHistory(limit: number, beforeId?: number): HistoryEvent[] {
     return this.persistence.listEvents(limit, beforeId);
+  }
+
+  /** Participant-count time series for the /participant-stats dashboard. */
+  getParticipantSamples(query: { fromMs?: number; toMs?: number; courseId?: string; limit?: number }): {
+    samples: ParticipantSample[];
+    minParticipants: number;
+  } {
+    const toMs = query.toMs ?? Date.now();
+    const fromMs = query.fromMs ?? toMs - 24 * 60 * 60 * 1000;
+    return {
+      samples: this.persistence.listParticipantSamples({
+        fromMs,
+        toMs,
+        courseId: query.courseId,
+        limit: query.limit ?? 500
+      }),
+      minParticipants: AdmiralEngine.ROOM_MIN_PARTICIPANTS
+    };
   }
 
   private emitStatus(): void {
@@ -377,6 +454,13 @@ export class AdmiralEngine {
       if (this.state === "InRoom") {
         await this.refreshParticipantsIfDue();
       }
+
+      // Room watch: evaluate the freshest scrape (empty-room + dead-scrape
+      // handling), sample the headcount for /participant-stats, then run any
+      // pending sweep/rejoin work before the state machine sees this tick.
+      this.evaluateRoomOccupancy();
+      this.maybeRecordParticipantSample();
+      await this.maintainRoomCoverage();
 
       const heartbeatAge = this.heartbeat.getNewestAgeSeconds();
       const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
@@ -497,10 +581,7 @@ export class AdmiralEngine {
             }
           }
 
-          this.participantSnapshot = { count: 0, names: [], nameExactMatchCount: 0 };
-          this.duplicateStreak = 0;
-          this.bbbJoinUrl = null;
-          this.currentRoomSlot = null;
+          this.resetRoomPresence();
           this.persistControlState();
           this.reason = "Left room";
         } else {
@@ -534,20 +615,23 @@ export class AdmiralEngine {
     }
   }
 
-  private async refreshParticipantsIfDue(): Promise<void> {
+  private async refreshParticipantsIfDue(force = false): Promise<void> {
     const now = Date.now();
     const intervalMs = this.config.duplicateDetection.scrapeIntervalSeconds * 1000;
-    if (now - this.lastScrapeAtMs < intervalMs) return;
+    if (!force && now - this.lastScrapeAtMs < intervalMs) return;
     this.lastScrapeAtMs = now;
 
-    if (this.activeSlot == null) return;
+    // Scrape the room Admiral is actually in — after an empty-room sweep that
+    // can be an adopted room rather than the scheduled slot's room.
+    const room = this.currentRoomSlot ?? this.activeSlot;
+    if (room == null) return;
 
     if (this.dryRun) {
       // Dry-run mode keeps participant state static while exercising transitions.
       return;
     }
 
-    this.participantSnapshot = await this.bbb.scrapeParticipants(this.activeSlot.myDisplayName);
+    this.participantSnapshot = await this.bbb.scrapeParticipants(room.myDisplayName);
     if (this.participantSnapshot.nameExactMatchCount >= 2) {
       this.duplicateStreak += 1;
     } else {
@@ -555,7 +639,224 @@ export class AdmiralEngine {
     }
   }
 
-  private async performJoin(slot: ActiveSlot): Promise<boolean> {
+  // ── Room watch ────────────────────────────────────────────────────────────
+
+  /**
+   * Evaluates the freshest participant scrape while InRoom. Two failure modes:
+   *  - the scrape keeps failing: the client fell out of the room → leave and
+   *    rejoin once; if it keeps happening, treat the room like an empty one
+   *    (a room Admiral can't observe is a room it can't cover in).
+   *  - the headcount stays below ROOM_MIN_PARTICIPANTS past the grace+confirm
+   *    windows → trigger a room sweep.
+   * Runs at most once per fresh scrape (scrapes have their own interval), and
+   * never in dry-run (whose static zero snapshot would look "empty").
+   */
+  private evaluateRoomOccupancy(): void {
+    if (this.dryRun || !AdmiralEngine.ROOM_WATCH_ENABLED) return;
+    if (this.state !== "InRoom" || this.currentRoomSlot == null) return;
+    if (this.lastScrapeAtMs === 0 || this.lastScrapeAtMs === this.lastEvaluatedScrapeAtMs) return;
+    this.lastEvaluatedScrapeAtMs = this.lastScrapeAtMs;
+
+    const now = Date.now();
+    const snapshot = this.participantSnapshot;
+
+    if (!snapshot.scrapeOk) {
+      this.scrapeFailStreak += 1;
+      if (this.scrapeFailStreak >= AdmiralEngine.SCRAPE_FAIL_LEAVE_THRESHOLD) {
+        this.scrapeFailStreak = 0;
+        this.scrapeDeadRoomPending = true;
+      }
+      return;
+    }
+    this.scrapeFailStreak = 0;
+
+    // Grace period: people trickle in after the join, and classes start late.
+    if (now - this.roomEnteredAtMs < AdmiralEngine.ROOM_EMPTY_GRACE_MS) return;
+
+    if (snapshot.count < AdmiralEngine.ROOM_MIN_PARTICIPANTS) {
+      if (this.belowThresholdSinceMs == null) this.belowThresholdSinceMs = now;
+      const belowForMs = now - this.belowThresholdSinceMs;
+      if (belowForMs >= AdmiralEngine.ROOM_EMPTY_CONFIRM_MS) {
+        this.persistence.appendEvent({
+          kind: "room_empty_detected",
+          slot: this.currentRoomSlot,
+          payload: {
+            count: snapshot.count,
+            minParticipants: AdmiralEngine.ROOM_MIN_PARTICIPANTS,
+            belowThresholdForSeconds: Math.round(belowForMs / 1000),
+            adopted: this.adoptedFromSlotKey != null
+          }
+        });
+        this.belowThresholdSinceMs = null;
+        this.roomSweepPending = true;
+      }
+    } else {
+      this.belowThresholdSinceMs = null;
+    }
+  }
+
+  /** Stores the headcount every PARTICIPANT_SAMPLE_MS while InRoom, fresh scrapes only. */
+  private maybeRecordParticipantSample(): void {
+    if (this.dryRun || this.state !== "InRoom" || this.currentRoomSlot == null) return;
+    if (!this.participantSnapshot.scrapeOk) return; // never persist a fake zero
+    if (this.lastScrapeAtMs === 0 || this.lastScrapeAtMs <= this.lastSampleAtMs) return;
+    if (Date.now() - this.lastSampleAtMs < AdmiralEngine.PARTICIPANT_SAMPLE_MS) return;
+    this.recordParticipantSample();
+  }
+
+  private recordParticipantSample(): void {
+    if (this.dryRun || this.currentRoomSlot == null || !this.participantSnapshot.scrapeOk) return;
+    this.lastSampleAtMs = Date.now();
+    this.persistence.insertParticipantSample({
+      tsMs: this.lastSampleAtMs,
+      slotKey: this.sessionKey(this.currentRoomSlot),
+      courseId: this.currentRoomSlot.courseId,
+      className: this.currentRoomSlot.className,
+      participantCount: this.participantSnapshot.count,
+      adopted: this.adoptedFromSlotKey != null
+    });
+  }
+
+  /** Resets room-watch state and records the baseline sample on room entry. */
+  private onEnteredRoom(): void {
+    this.roomEnteredAtMs = Date.now();
+    this.belowThresholdSinceMs = null;
+    this.scrapeFailStreak = 0;
+    this.lastEvaluatedScrapeAtMs = 0;
+    this.recordParticipantSample();
+  }
+
+  /** Clears all per-room state after leaving any room (scheduled or adopted). */
+  private resetRoomPresence(): void {
+    this.participantSnapshot = { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
+    this.duplicateStreak = 0;
+    this.bbbJoinUrl = null;
+    this.currentRoomSlot = null;
+    this.adoptedFromSlotKey = null;
+    this.adoptedFromClassName = null;
+    this.roomEnteredAtMs = 0;
+    this.belowThresholdSinceMs = null;
+    this.scrapeFailStreak = 0;
+    this.lastEvaluatedScrapeAtMs = 0;
+  }
+
+  /**
+   * Room-coverage maintenance, run each tick before the state machine
+   * transition: ends adoptions whose origin slot passed, fires the re-sweep
+   * timer, and executes pending scrape-dead rejoins / room sweeps. Kept out of
+   * the pure state machine on purpose (conservative boundary): like
+   * performJoin/performLeave, this is engine orchestration.
+   */
+  private async maintainRoomCoverage(): Promise<void> {
+    if (this.dryRun) return;
+    const now = Date.now();
+
+    // (a) Leave an adopted room once its origin slot is over or the active
+    // slot changed (back-to-back slots, or a schedule hot-reload — the normal
+    // join logic then picks up the correct current slot).
+    if (this.state === "InRoom" && this.adoptedFromSlotKey != null) {
+      const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+      if (currentKey !== this.adoptedFromSlotKey) {
+        await this.endAdoption("Origin slot ended");
+      }
+    }
+
+    // (b) Drop the re-sweep timer once its origin slot has passed.
+    if (this.nextRoomSweepAtMs != null) {
+      const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+      if (currentKey == null || currentKey !== this.sweepOriginSlotKey) {
+        this.nextRoomSweepAtMs = null;
+      }
+    }
+
+    // (c) Re-sweep timer fired while sitting in the empty scheduled room.
+    if (
+      this.nextRoomSweepAtMs != null &&
+      now >= this.nextRoomSweepAtMs &&
+      this.state === "InRoom" &&
+      this.adoptedFromSlotKey == null &&
+      this.activeSlot != null &&
+      this.sessionKey(this.activeSlot) === this.sweepOriginSlotKey
+    ) {
+      this.roomSweepPending = true;
+    }
+
+    // (d) Scrape-dead room: leave + rejoin once; on repeat (or when an adopted
+    // room died), treat the room like an empty one and sweep instead.
+    if (this.scrapeDeadRoomPending) {
+      this.scrapeDeadRoomPending = false;
+      await this.handleScrapeDeadRoom();
+    }
+
+    // (e) Run a pending sweep.
+    if (this.roomSweepPending) {
+      this.roomSweepPending = false;
+      if (
+        AdmiralEngine.ROOM_WATCH_ENABLED &&
+        (this.state === "InRoom" || this.state === "Out") &&
+        this.activeSlot != null &&
+        !this.sweepHaltedForSlot
+      ) {
+        await this.performRoomSweep();
+      }
+    }
+  }
+
+  private async handleScrapeDeadRoom(): Promise<void> {
+    const room = this.currentRoomSlot;
+    if (room == null) return;
+
+    this.persistence.appendEvent({
+      kind: "room_scrape_failed",
+      slot: room,
+      payload: {
+        consecutiveFailures: AdmiralEngine.SCRAPE_FAIL_LEAVE_THRESHOLD,
+        rejoinAttempts: this.scrapeFailRejoins
+      }
+    });
+
+    if (this.state === "InRoom") {
+      await this.performLeave();
+      this.state = "Out";
+    }
+    const wasAdopted = this.adoptedFromSlotKey != null;
+    this.resetRoomPresence();
+    this.persistControlState();
+    this.emitStatus();
+
+    if (wasAdopted || this.scrapeFailRejoins >= 1) {
+      // Repeatedly unobservable (or an adopted room died): same handling as an
+      // empty room — probe the other course rooms instead of flapping here.
+      if (!this.sweepHaltedForSlot) this.roomSweepPending = true;
+      return;
+    }
+
+    this.scrapeFailRejoins += 1;
+    if (this.activeSlot != null) {
+      const joined = await this.performJoin(this.activeSlot, {
+        suppressCoverEmail: true,
+        rejoinReason: "scrape_dead_rejoin"
+      });
+      this.state = joined ? "InRoom" : "Out";
+    }
+  }
+
+  /** Leaves an adopted room and resets presence so normal logic resumes. */
+  private async endAdoption(reason: string): Promise<void> {
+    const room = this.currentRoomSlot;
+    this.persistence.appendEvent({ kind: "room_adopted_end", slot: room, payload: { reason } });
+    await this.performLeave();
+    this.state = "Out";
+    this.resetRoomPresence();
+    this.persistControlState();
+    this.reason = reason;
+    this.emitStatus();
+  }
+
+  private async performJoin(
+    slot: ActiveSlot,
+    opts?: { suppressCoverEmail?: boolean; rejoinReason?: string }
+  ): Promise<boolean> {
     if (this.dryRun) {
       this.reason = `Dry-run: would join ${slot.courseId}`;
       // Reset failure tracking on a successful (dry-run) join.
@@ -600,23 +901,34 @@ export class AdmiralEngine {
         displayNameOverride: process.env.DISPLAY_NAME
       });
 
-      await this.refreshParticipantsIfDue();
       this.currentRoomSlot = slot;
+      // Force a fresh scrape so duplicate detection and the baseline sample
+      // start from the room just entered, not a stale snapshot.
+      await this.refreshParticipantsIfDue(true);
+      this.onEnteredRoom();
 
       // Successful join — clear failure tracking.
       this.joinFailureStreak = 0;
       this.lastFailedSlotKey = null;
       this.persistControlState();
-      this.persistence.appendEvent({ kind: "join_success", slot });
-
-      const coverKind = this.center.wasCoverStarted(this.sessionKey(slot))
-        ? "cover_resume"
-        : "cover_start";
-      this.center.enqueue({
-        kind: coverKind,
+      this.persistence.appendEvent({
+        kind: "join_success",
         slot,
-        payload: { slot, joinUrl: resolved.joinUrl }
+        payload: opts?.rejoinReason ? { reason: opts.rejoinReason } : undefined
       });
+
+      // Sweep-driven rejoins of the scheduled room skip the cover email: the
+      // 15-min retry cycle would otherwise burn the per-session email caps.
+      if (!opts?.suppressCoverEmail) {
+        const coverKind = this.center.wasCoverStarted(this.sessionKey(slot))
+          ? "cover_resume"
+          : "cover_start";
+        this.center.enqueue({
+          kind: coverKind,
+          slot,
+          payload: { slot, joinUrl: resolved.joinUrl }
+        });
+      }
 
       return true;
     } catch (error) {
@@ -687,6 +999,305 @@ export class AdmiralEngine {
       this.reason = `Leave failed: ${error instanceof Error ? error.message : String(error)}`;
       return false;
     }
+  }
+
+  // ── Room sweep ────────────────────────────────────────────────────────────
+
+  /**
+   * Courses to probe during a sweep: every configured course except the origin
+   * (a moved class could have landed in any of them), courses with a slot on
+   * today's IST date first, the rest in config order.
+   */
+  private sweepCandidates(originSlot: ActiveSlot): CourseConfig[] {
+    const today = getCurrentIstDay();
+    const others = this.config.courses.filter((c) => c.courseId !== originSlot.courseId);
+    const hasSlotToday = (c: CourseConfig): boolean => c.weeklySlots.some((s) => s.days.includes(today));
+    return [...others.filter(hasSlotToday), ...others.filter((c) => !hasSlotToday(c))];
+  }
+
+  /**
+   * Joins a candidate room and counts heads after a short settle. When the
+   * room qualifies the browser session is LEFT IN PLACE so adoption keeps the
+   * very same room; otherwise the room is left quietly before the next probe.
+   * Debug artifacts land in their own .runtime dir like the normal join path.
+   */
+  private async probeRoom(course: CourseConfig): Promise<{
+    count: number;
+    scrapeOk: boolean;
+    joinUrl: string | null;
+    snapshot: ParticipantSnapshot | null;
+    error?: string;
+  }> {
+    const safeCourse = course.courseId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const runtimeDir = `.runtime/worker/probe-${safeCourse}-${timestamp}`;
+    try {
+      const resolved = await resolveJoinUrl({
+        lmsUrl: process.env.LMS_URL ?? "",
+        username: process.env.MOODLE_USERNAME,
+        password: process.env.MOODLE_PASSWORD,
+        classPageUrl: course.classPageUrl,
+        joinLinkText: course.joinLinkText,
+        headless: this.headless,
+        postClickWaitMs: this.postClickWaitMs,
+        runtimeDir
+      });
+
+      await this.bbb.join({
+        joinUrl: resolved.joinUrl,
+        authStatePath: resolved.authStatePath,
+        headless: this.headless,
+        moodleUsername: process.env.MOODLE_USERNAME,
+        moodlePassword: process.env.MOODLE_PASSWORD,
+        displayNameOverride: process.env.DISPLAY_NAME
+      });
+
+      // Participants render asynchronously; settle, then take the better of
+      // two scrapes so a half-rendered list can't read as "empty".
+      await sleep(AdmiralEngine.ROOM_SWEEP_PROBE_SETTLE_MS);
+      const first = await this.bbb.scrapeParticipants(course.myDisplayName);
+      await sleep(5_000);
+      const second = await this.bbb.scrapeParticipants(course.myDisplayName);
+      const best = !first.scrapeOk
+        ? second
+        : !second.scrapeOk
+          ? first
+          : second.count >= first.count
+            ? second
+            : first;
+
+      if (best.scrapeOk && best.count >= AdmiralEngine.ROOM_MIN_PARTICIPANTS) {
+        return { count: best.count, scrapeOk: true, joinUrl: resolved.joinUrl, snapshot: best };
+      }
+
+      await this.bbb.leave().catch(() => undefined);
+      return { count: best.count, scrapeOk: best.scrapeOk, joinUrl: null, snapshot: best };
+    } catch (error) {
+      return {
+        count: 0,
+        scrapeOk: false,
+        joinUrl: null,
+        snapshot: null,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /**
+   * Leaves the current (empty or scrape-dead) room and probes the other
+   * configured course rooms, adopting the first one with enough people — what
+   * the user does by hand when their class is empty. If no room qualifies, it
+   * rejoins the scheduled room (attendance-safe, the user's chosen behaviour)
+   * and arms the re-sweep timer. Capped per slot so a bad day can't roam forever.
+   */
+  private async performRoomSweep(): Promise<void> {
+    const originSlot = this.activeSlot;
+    if (originSlot == null) return;
+
+    const originKey = this.sessionKey(originSlot);
+    if (this.sweepOriginSlotKey !== originKey) {
+      this.sweepOriginSlotKey = originKey;
+      this.sweepsThisSlot = 0;
+      this.scrapeFailRejoins = 0;
+      this.sweepHaltedForSlot = false;
+    }
+    this.sweepsThisSlot += 1;
+
+    this.persistence.appendEvent({
+      kind: "room_sweep_start",
+      slot: originSlot,
+      payload: {
+        sweep: this.sweepsThisSlot,
+        maxSweeps: AdmiralEngine.ROOM_SWEEP_MAX_PER_SLOT,
+        fromClassName: this.currentRoomSlot?.className ?? originSlot.className
+      }
+    });
+
+    if (this.sweepsThisSlot > AdmiralEngine.ROOM_SWEEP_MAX_PER_SLOT) {
+      // Safety cap: stop roaming for this slot; sit in the scheduled room.
+      this.sweepHaltedForSlot = true;
+      this.nextRoomSweepAtMs = null;
+      this.persistence.appendEvent({
+        kind: "room_sweep_stopped",
+        slot: originSlot,
+        payload: { sweeps: this.sweepsThisSlot - 1 }
+      });
+      if (this.state === "InRoom" && this.adoptedFromSlotKey != null) {
+        await this.performLeave();
+        this.state = "Out";
+        this.resetRoomPresence();
+      }
+      if (this.state !== "InRoom") {
+        const joined = await this.performJoin(originSlot, {
+          suppressCoverEmail: true,
+          rejoinReason: "sweep_cap_reached"
+        });
+        this.state = joined ? "InRoom" : "Out";
+      }
+      this.emitStatus();
+      return;
+    }
+
+    // Leave whatever room we're in (the empty scheduled one or a dead adopted one).
+    if (this.state === "InRoom") {
+      const left = await this.performLeave();
+      this.state = "Out";
+      if (!left) {
+        this.persistence.appendEvent({ kind: "room_sweep_abort", slot: originSlot, payload: { reason: "leave failed" } });
+        // Don't roam with a possibly-wedged browser; normal logic retries later.
+        this.emitStatus();
+        return;
+      }
+    }
+    this.resetRoomPresence();
+    this.persistControlState();
+    this.emitStatus();
+
+    const candidates = this.sweepCandidates(originSlot);
+    const probed: { courseId: string; count: number | null; error?: string }[] = [];
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const course = candidates[i]!;
+      // Liveness pulse: a multi-room sweep runs for minutes, past the 180s
+      // health threshold — without this, Docker autoheal would restart the
+      // worker mid-sweep.
+      this.lastTickMs = Date.now();
+      this.reason = `Room sweep #${this.sweepsThisSlot}: probing ${course.className} (${i + 1}/${candidates.length})`;
+      this.emitStatus();
+
+      // Abort between probes if the world changed or the user intervened.
+      const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+      if (currentKey !== originKey || this.standdown || this.forceLeavePending) {
+        this.persistence.appendEvent({
+          kind: "room_sweep_abort",
+          slot: originSlot,
+          payload: { reason: currentKey !== originKey ? "origin slot ended or changed" : "user override", probed }
+        });
+        this.emitStatus();
+        return;
+      }
+
+      const probe = await this.probeRoom(course);
+      probed.push({
+        courseId: course.courseId,
+        count: probe.scrapeOk ? probe.count : null,
+        ...(probe.error ? { error: probe.error } : {})
+      });
+      this.persistence.appendEvent({
+        kind: "room_sweep_probe",
+        slot: originSlot,
+        payload: {
+          courseId: course.courseId,
+          className: course.className,
+          count: probe.scrapeOk ? probe.count : null,
+          scrapeOk: probe.scrapeOk,
+          ...(probe.error ? { error: probe.error } : {})
+        }
+      });
+      this.emitStatus();
+
+      if (probe.scrapeOk && probe.snapshot != null && probe.count >= AdmiralEngine.ROOM_MIN_PARTICIPANTS) {
+        this.adoptProbedRoom(
+          course,
+          { count: probe.count, joinUrl: probe.joinUrl, snapshot: probe.snapshot },
+          originSlot,
+          originKey,
+          probed
+        );
+        return;
+      }
+    }
+
+    await this.finishSweepFallback(originSlot, originKey, probed);
+  }
+
+  /**
+   * Adopts a qualifying probed room. The browser session is already inside it
+   * (probeRoom leaves it in place). Coverage stays capped by the origin slot's
+   * end — the conservative "leave when the slot ends" contract — enforced by
+   * the adoption guard in maintainRoomCoverage.
+   */
+  private adoptProbedRoom(
+    course: CourseConfig,
+    probe: { count: number; joinUrl: string | null; snapshot: ParticipantSnapshot },
+    originSlot: ActiveSlot,
+    originKey: string,
+    probed: { courseId: string; count: number | null; error?: string }[]
+  ): void {
+    const adoptedSlot: ActiveSlot = {
+      courseId: course.courseId,
+      className: course.className,
+      classPageUrl: course.classPageUrl,
+      joinLinkText: course.joinLinkText,
+      myDisplayName: course.myDisplayName,
+      startedAt: new Date().toISOString(),
+      endsAt: originSlot.endsAt
+    };
+    this.currentRoomSlot = adoptedSlot;
+    this.adoptedFromSlotKey = originKey;
+    this.adoptedFromClassName = originSlot.className;
+    this.participantSnapshot = probe.snapshot;
+    this.bbbJoinUrl = probe.joinUrl;
+    this.state = "InRoom";
+    this.nextRoomSweepAtMs = null;
+    this.lastScrapeAtMs = Date.now();
+    this.persistControlState();
+    this.onEnteredRoom();
+    this.persistence.appendEvent({
+      kind: "room_adopted",
+      slot: adoptedSlot,
+      payload: {
+        count: probe.count,
+        originCourseId: originSlot.courseId,
+        originClassName: originSlot.className,
+        probed
+      }
+    });
+    this.center.enqueue({
+      kind: "cover_resume",
+      slot: adoptedSlot,
+      payload: { slot: adoptedSlot, joinUrl: probe.joinUrl, movedFrom: originSlot.className }
+    });
+    this.reason = `Covering ${course.className} (moved from empty ${originSlot.className})`;
+    this.emitStatus();
+  }
+
+  /**
+   * No probed room qualified: alert once per slot, rejoin the scheduled room
+   * (attendance-safe — the user's chosen behaviour) and arm the re-sweep timer.
+   */
+  private async finishSweepFallback(
+    originSlot: ActiveSlot,
+    originKey: string,
+    probed: { courseId: string; count: number | null; error?: string }[]
+  ): Promise<void> {
+    this.persistence.appendEvent({ kind: "room_sweep_exhausted", slot: originSlot, payload: { probed } });
+    this.center.enqueue({
+      kind: "action_needed",
+      slot: originSlot,
+      payload: {
+        reason: "room_empty_everywhere",
+        probed,
+        minParticipants: AdmiralEngine.ROOM_MIN_PARTICIPANTS,
+        retryMinutes: Math.round(AdmiralEngine.ROOM_SWEEP_RETRY_MS / 60_000)
+      }
+    });
+
+    const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
+    if (currentKey === originKey) {
+      const joined = await this.performJoin(originSlot, {
+        suppressCoverEmail: true,
+        rejoinReason: "room_sweep_fallback"
+      });
+      this.state = joined ? "InRoom" : "Out";
+      if (joined) {
+        this.nextRoomSweepAtMs = Date.now() + AdmiralEngine.ROOM_SWEEP_RETRY_MS;
+        this.reason =
+          `${originSlot.className} is empty; sitting in it anyway — ` +
+          `rechecking other rooms in ${Math.round(AdmiralEngine.ROOM_SWEEP_RETRY_MS / 60_000)}m`;
+      }
+    }
+    this.emitStatus();
   }
 
   private sessionKey(slot: ActiveSlot): string {

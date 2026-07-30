@@ -393,7 +393,7 @@ export class NotificationCenter {
       case "cover_start":
         return renderCoverStart(slot, row.payload.joinUrl ?? null, nowMs);
       case "cover_resume":
-        return renderCoverResume(slot, nowMs);
+        return renderCoverResume(slot, row.payload, nowMs);
       case "handoff":
         return renderHandoff(slot, nowMs);
       case "action_needed":
@@ -558,11 +558,25 @@ function renderCoverStart(slot: ActiveSlot | null, joinUrl: unknown, nowMs: numb
   return { subject: `Admiral in room — ${slot?.className ?? "class"}`, lines };
 }
 
-function renderCoverResume(slot: ActiveSlot | null, nowMs: number) {
-  const lines = ["You dropped — Admiral is back in the room covering for you.", ""];
+function renderCoverResume(slot: ActiveSlot | null, payload: Record<string, unknown>, nowMs: number) {
+  const movedFrom = typeof payload.movedFrom === "string" && payload.movedFrom ? payload.movedFrom : null;
+  const lines = movedFrom
+    ? [
+        `"${movedFrom}" looked empty — Admiral checked the other course rooms and moved to cover this one instead.`,
+        ""
+      ]
+    : ["You dropped — Admiral is back in the room covering for you.", ""];
   if (slot) lines.push(...slotLines(slot, nowMs));
   lines.push("", "Rejoin when you can; Admiral will hand off automatically.");
-  return { subject: `Covering again — ${slot?.className ?? "class"}`, lines };
+  if (movedFrom) {
+    lines.push("", "If the timetable changed, update the schedule gist so Admiral targets the right room directly.");
+  }
+  return {
+    subject: movedFrom
+      ? `Moved rooms — covering ${slot?.className ?? "class"}`
+      : `Covering again — ${slot?.className ?? "class"}`,
+    lines
+  };
 }
 
 function renderHandoff(slot: ActiveSlot | null, nowMs: number) {
@@ -572,9 +586,48 @@ function renderHandoff(slot: ActiveSlot | null, nowMs: number) {
 }
 
 function renderActionNeeded(slot: ActiveSlot | null, payload: Record<string, unknown>, nowMs: number) {
+  const reason = String(payload.reason ?? "alert");
+
+  // Room sweep found the scheduled class empty AND every other configured
+  // course room empty too. Sent at most once per slot (dedupe per reason).
+  if (reason === "room_empty_everywhere") {
+    const probed = Array.isArray(payload.probed) ? payload.probed : [];
+    const retryMinutes = Number(payload.retryMinutes ?? 15);
+    const emptyLines = [
+      `${slot?.className ?? "The scheduled class"} looks empty, and none of the other configured course rooms have people either.`,
+      "",
+      `Admiral is sitting in the scheduled room anyway (in case attendance is taken there) and will re-check the other rooms every ~${retryMinutes} min until the slot ends.`,
+      ""
+    ];
+    if (probed.length > 0) {
+      emptyLines.push("Rooms checked:");
+      for (const entry of probed) {
+        const rec = entry as { courseId?: unknown; count?: unknown; error?: unknown };
+        emptyLines.push(
+          `  • ${String(rec.courseId ?? "?")}: ${rec.error ? `probe failed (${String(rec.error)})` : `${String(rec.count ?? "?")} people`}`
+        );
+      }
+      emptyLines.push("");
+    }
+    if (slot) {
+      const endsIn = minutesFromNow(slot.endsAt, nowMs);
+      emptyLines.push(
+        `Class:     ${slot.className}`,
+        `Course ID: ${slot.courseId}`,
+        `Slot:      ${shortIstTime(slot.startedAt)} – ${shortIstTime(slot.endsAt)} (${slotDurationMinutes(slot)} min)`,
+        endsIn > 0 ? `~${endsIn} min left in the slot.` : "The slot has ended.",
+        ""
+      );
+    }
+    emptyLines.push(
+      "If the timetable changed, update the schedule gist — Admiral hot-reloads it within a few minutes.",
+      "The headcount timeline is on the dashboard at /participant-stats."
+    );
+    return { subject: `ACTION: ${slot?.className ?? "Class"} looks empty everywhere`, lines: emptyLines };
+  }
+
   const failureCount = Number(payload.failureCount ?? 0);
   const backoffMinutes = Number(payload.backoffMinutes ?? 0);
-  const reason = String(payload.reason ?? "alert");
   const lines = [
     `Admiral cannot join this class right now (${reason}).`,
     "",

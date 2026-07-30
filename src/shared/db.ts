@@ -109,6 +109,26 @@ const MIGRATIONS: readonly Migration[] = [
       -- Myself" in session 1 and the PWA is still sending heartbeats).
       ALTER TABLE worker_state ADD COLUMN last_active_slot_key TEXT;
     `
+  },
+  {
+    version: 5,
+    statements: `
+      -- Participant-count time series: one row per sample while Admiral is in
+      -- a room (every few minutes plus a baseline at each room entry). Powers
+      -- the /participant-stats dashboard and gives an audit trail for the
+      -- empty-room watch added after the 2026-07-30 stale-schedule incident.
+      CREATE TABLE participant_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms INTEGER NOT NULL,
+        slot_key TEXT,
+        course_id TEXT NOT NULL,
+        class_name TEXT,
+        participant_count INTEGER NOT NULL,
+        adopted INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_participant_samples_ts ON participant_samples (ts_ms);
+      CREATE INDEX idx_participant_samples_slot ON participant_samples (slot_key);
+    `
   }
 ];
 

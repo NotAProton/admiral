@@ -68,6 +68,10 @@ export function getCurrentIstIso(): string {
   return nowInIst().iso;
 }
 
+export function getCurrentIstDay(): DayName {
+  return nowInIst().day;
+}
+
 function maybeActiveCourse(course: CourseConfig, day: DayName, nowMinutes: number, nowIso: string): ActiveSlot | null {
   for (const slot of course.weeklySlots) {
     if (!slot.days.includes(day)) continue;

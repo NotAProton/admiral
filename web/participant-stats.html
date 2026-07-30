@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <title>Admiral — Participant stats</title>
+    <link rel="manifest" href="/manifest.json" />
+    <style>
+      /* Same palette and language as the status page: white, black, accent #1c1c84. */
+      :root { --bg: #ffffff; --ink: #000000; --accent: #1c1c84; }
+      * { box-sizing: border-box; border-radius: 0 !important; }
+      body {
+        margin: 0;
+        font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 14px;
+        line-height: 1.5;
+        color: var(--ink);
+        background: var(--bg);
+        min-height: 100vh;
+      }
+      .topbar {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; flex-wrap: wrap;
+        background: var(--ink); color: #ffffff;
+        padding: 12px 20px; border-bottom: 4px solid var(--accent);
+      }
+      .brand { font-size: 18px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase; }
+      .brand::before { content: "■"; color: var(--accent); margin-right: 10px; }
+      .brand-sub { margin-left: 14px; font-size: 11px; font-weight: 400; letter-spacing: 1px; opacity: 0.65; text-transform: uppercase; }
+      .shell { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; display: grid; gap: 16px; }
+      .app { display: grid; gap: 16px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      .hidden { display: none !important; }
+      .muted { opacity: 0.6; font-size: 12px; }
+      .hint { margin-top: 10px; font-size: 12px; opacity: 0.6; }
+      .panel { background: var(--bg); border: 2px solid var(--ink); padding: 16px; }
+      .panel-title {
+        font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+        border-bottom: 1px solid var(--ink); padding-bottom: 8px; margin-bottom: 12px;
+      }
+      .panel-title::before { content: "■"; color: var(--accent); margin-right: 8px; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px;
+        font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+        background: var(--bg); color: var(--ink); border: 1px solid var(--ink);
+      }
+      .topbar .pill { border-color: #ffffff; color: #ffffff; background: transparent; text-decoration: none; }
+      .topbar .pill:hover { background: #ffffff; color: var(--ink); }
+      a { color: var(--accent); }
+      button {
+        font: inherit; font-weight: 700; font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+        padding: 10px 16px; cursor: pointer; color: #ffffff; background: var(--accent); border: 2px solid var(--accent);
+      }
+      button.secondary { background: var(--bg); color: var(--ink); border-color: var(--ink); }
+      button.secondary:hover:not(:disabled) { background: var(--ink); color: #ffffff; }
+      input, select { font: inherit; padding: 8px 10px; color: var(--ink); background: var(--bg); border: 2px solid var(--ink); }
+      label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; display: inline-flex; gap: 8px; align-items: center; }
+      .error-banner { display: none; background: var(--ink); color: #ffffff; border-left: 6px solid var(--accent); padding: 10px 14px; font-size: 12px; }
+      #chart { width: 100%; height: auto; display: block; }
+      .cards { display: grid; gap: 10px; }
+      .card { border: 1px solid var(--ink); padding: 10px 12px; font-size: 12px; }
+      .card .card-title { font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+      .badge {
+        display: inline-block; padding: 1px 6px; font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+        border: 1px solid var(--accent); color: var(--accent); margin-left: 8px;
+      }
+      .badge.low { border-color: var(--ink); background: var(--ink); color: #ffffff; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--ink); }
+      th { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; }
+      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      tr.low td { color: var(--accent); font-weight: 700; }
+      .table-wrap { max-height: 320px; overflow: auto; border: 1px solid var(--ink); }
+      @media (max-width: 640px) {
+        .shell { padding: 16px 12px 40px; }
+        .brand-sub { display: block; margin-left: 0; margin-top: 2px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Admiral<span class="brand-sub">Participant stats</span></div>
+      <a class="pill" href="/">← Status</a>
+    </header>
+
+    <main class="shell">
+      <div id="errorBanner" class="error-banner" role="alert"></div>
+
+      <section id="loginCard" class="panel hidden">
+        <div class="panel-title">Authentication</div>
+        <div>Session expired or not logged in.</div>
+        <div class="hint"><a href="/">Log in on the status page</a> — the session cookie is shared across pages.</div>
+      </section>
+
+      <section id="appCard" class="app">
+        <div class="panel">
+          <div class="panel-title">Controls</div>
+          <div class="row">
+            <label>IST date <input id="dateInput" type="date" /></label>
+            <label>Course <select id="courseSelect"><option value="">All courses</option></select></label>
+            <button id="reloadBtn" class="secondary">Reload</button>
+            <span id="metaLine" class="muted"></span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Headcount timeline</div>
+          <svg id="chart" viewBox="0 0 960 260" role="img" aria-label="Participant count over time"></svg>
+          <div class="row" style="margin-top: 8px">
+            <span class="pill">— headcount</span>
+            <span class="pill">- - dashed = empty threshold</span>
+            <span class="pill">accent dot = below threshold</span>
+            <span class="pill">ring = adopted via sweep</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Sessions</div>
+          <div id="sessionCards" class="cards"><div class="muted">No samples in this window.</div></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Raw samples</div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>IST time</th><th>Class</th><th class="num">People</th><th>Room</th></tr>
+              </thead>
+              <tbody id="sampleRows">
+                <tr><td colspan="4" class="muted">No samples in this window.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/participant-stats.js" type="module"></script>
+  </body>
+</html>

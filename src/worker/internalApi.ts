@@ -16,6 +16,13 @@ const historyQuerySchema = z.object({
   before: z.coerce.number().int().positive().optional()
 });
 
+const participantSamplesQuerySchema = z.object({
+  from: z.coerce.number().int().positive().optional(),
+  to: z.coerce.number().int().positive().optional(),
+  courseId: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(2000).default(500)
+});
+
 function writeSse(reply: FastifyReply, event: string, payload: StatusResponse): void {
   reply.raw.write(`event: ${event}\n`);
   reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -49,6 +56,21 @@ export async function startInternalApi(engine: AdmiralEngine, port: number): Pro
     async (request: FastifyRequest<{ Querystring: { limit?: string; before?: string } }>) => {
       const query = historyQuerySchema.parse(request.query ?? {});
       return { events: engine.getHistory(query.limit, query.before) };
+    }
+  );
+
+  app.get(
+    "/internal/participant-samples",
+    async (
+      request: FastifyRequest<{ Querystring: { from?: string; to?: string; courseId?: string; limit?: string } }>
+    ) => {
+      const query = participantSamplesQuerySchema.parse(request.query ?? {});
+      return engine.getParticipantSamples({
+        fromMs: query.from,
+        toMs: query.to,
+        courseId: query.courseId,
+        limit: query.limit
+      });
     }
   );
 

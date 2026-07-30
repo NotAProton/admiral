@@ -53,6 +53,46 @@ export type ParticipantSnapshot = {
   count: number;
   names: string[];
   nameExactMatchCount: number;
+  /**
+   * False when the scrape itself failed (page gone / evaluate threw). A zero
+   * count with scrapeOk=false means "unknown", never "empty room" — the
+   * 2026-07-30 incident showed a silent zero is indistinguishable from a
+   * broken scrape without this flag.
+   */
+  scrapeOk: boolean;
+};
+
+/** One row of the participant-count time series (participant_samples table). */
+export type ParticipantSample = {
+  id: number;
+  tsMs: number;
+  tsIso: string;
+  slotKey: string | null;
+  courseId: string;
+  className: string | null;
+  participantCount: number;
+  /** True when sampled in a room Admiral adopted via an empty-room sweep. */
+  adopted: boolean;
+};
+
+export type CurrentRoomInfo = {
+  courseId: string;
+  className: string;
+  /** True when Admiral moved here via an empty-room sweep instead of the schedule. */
+  adopted: boolean;
+  adoptedFromClassName: string | null;
+  enteredAt: string | null;
+};
+
+export type RoomWatchInfo = {
+  enabled: boolean;
+  /** Below this headcount (including Admiral itself) a room counts as empty. */
+  minParticipants: number;
+  scrapeOk: boolean;
+  belowThresholdSince: string | null;
+  sweepsThisSlot: number;
+  maxSweepsPerSlot: number;
+  nextSweepRetryAt: string | null;
 };
 
 export type ActiveSlot = {
@@ -100,6 +140,8 @@ export type StatusResponse = {
   scheduleUrl: string | null;
   participantCount: number;
   participantNames: string[];
+  currentRoom: CurrentRoomInfo | null;
+  roomWatch: RoomWatchInfo;
   duplicateConfirmed: boolean;
   duplicateStreak: number;
   lastHeartbeatAgeSeconds: number | null;

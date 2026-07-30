@@ -132,6 +132,60 @@ test("email ledger counts within windows and prunes old rows", () => {
   assert.equal(p.countEmailsSince(nowMs - 15 * 60 * 1000), 2);
 });
 
+test("participant samples insert, filter by window and course, and prune", () => {
+  const p = memoryPersistence();
+  const nowMs = 1_800_000_000_000;
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  p.insertParticipantSample({
+    tsMs: nowMs - 20 * dayMs, // older than the 14-day default retention
+    slotKey: "old@slot",
+    courseId: "dsa-lab",
+    className: "Data Structures Lab",
+    participantCount: 1,
+    adopted: false
+  });
+  p.insertParticipantSample({
+    tsMs: nowMs - 10 * 60 * 1000,
+    slotKey: `${slot.courseId}@${slot.startedAt}`,
+    courseId: slot.courseId,
+    className: slot.className,
+    participantCount: 1,
+    adopted: false
+  });
+  p.insertParticipantSample({
+    tsMs: nowMs - 5 * 60 * 1000,
+    slotKey: "vapt@probe",
+    courseId: "vapt",
+    className: "VAPT",
+    participantCount: 27,
+    adopted: true
+  });
+  // The 20-day-old row was pruned by the inserts above.
+  const all = p.listParticipantSamples({ fromMs: 0, toMs: nowMs, limit: 100 });
+  assert.equal(all.length, 2);
+
+  // Oldest-first ordering.
+  assert.equal(all[0]?.participantCount, 1);
+  assert.equal(all[1]?.participantCount, 27);
+  assert.equal(all[1]?.adopted, true);
+  assert.equal(all[1]?.tsIso, new Date(nowMs - 5 * 60 * 1000).toISOString());
+
+  // Window filtering.
+  const windowed = p.listParticipantSamples({ fromMs: nowMs - 6 * 60 * 1000, toMs: nowMs, limit: 100 });
+  assert.equal(windowed.length, 1);
+  assert.equal(windowed[0]?.courseId, "vapt");
+
+  // Course filtering.
+  const byCourse = p.listParticipantSamples({ fromMs: 0, toMs: nowMs, courseId: slot.courseId, limit: 100 });
+  assert.equal(byCourse.length, 1);
+  assert.equal(byCourse[0]?.slotKey, `${slot.courseId}@${slot.startedAt}`);
+
+  // Limit is respected.
+  const limited = p.listParticipantSamples({ fromMs: 0, toMs: nowMs, limit: 1 });
+  assert.equal(limited.length, 1);
+});
+
 test("state survives close and reopen of a file-backed database", () => {
   const dir = mkdtempSync(join(tmpdir(), "admiral-db-test-"));
   try {
@@ -160,7 +214,7 @@ test("state survives close and reopen of a file-backed database", () => {
     // Reopening runs migrations idempotently: schema version stays applied.
     const db = openDatabase(dbPath);
     const row = db.prepare("PRAGMA user_version").get() as unknown as { user_version: number };
-    assert.equal(row.user_version, 4);
+    assert.equal(row.user_version, 5);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -114,7 +114,7 @@ export class BbbSession {
 
   async scrapeParticipants(targetDisplayName: string): Promise<ParticipantSnapshot> {
     if (!this.page) {
-      return { count: 0, names: [], nameExactMatchCount: 0 };
+      return { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
     }
 
     await this.openUserListPanel();
@@ -139,7 +139,14 @@ export class BbbSession {
           panelText
         };
       })
-      .catch(() => ({ usersCountText: "", names: [] as string[], panelText: "" }));
+      .catch(() => null);
+
+    // A failed evaluate means the client most likely fell out of the room
+    // (navigation, crash). Report "unknown" via scrapeOk=false instead of a
+    // fake zero count so the engine never mistakes it for an empty room.
+    if (!details) {
+      return { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
+    }
 
     const textCount = parseNumber(details.usersCountText.match(/(\d+)/)?.[1], 0);
     const listCount = details.names.length;
@@ -159,7 +166,8 @@ export class BbbSession {
     return {
       count,
       names: details.names,
-      nameExactMatchCount: Math.max(matchCountFromNames, matchCountFromText)
+      nameExactMatchCount: Math.max(matchCountFromNames, matchCountFromText),
+      scrapeOk: true
     };
   }
 

@@ -69,6 +69,8 @@ const overrideSchema = z.object({ action: z.enum(["force_join", "force_leave", "
 const publicFiles: Record<string, string> = {
   "/": resolve("web/index.html"),
   "/app.js": resolve("web/app.js"),
+  "/participant-stats": resolve("web/participant-stats.html"),
+  "/participant-stats.js": resolve("web/participant-stats.js"),
   "/manifest.json": resolve("web/manifest.json"),
   "/sw.js": resolve("web/sw.js")
 };
@@ -98,7 +100,9 @@ for (const [routePath, filePath] of Object.entries(publicFiles)) {
     const content = await readFile(filePath, "utf8");
     if (routePath.endsWith(".json")) reply.type("application/json");
     if (routePath.endsWith(".js")) reply.type("application/javascript");
-    if (routePath.endsWith(".html") || routePath === "/") reply.type("text/html");
+    // Check the file (not the route) so extensionless page routes like
+    // /participant-stats are still served as HTML.
+    if (filePath.endsWith(".html")) reply.type("text/html");
     return reply.send(content);
   });
 }
@@ -152,6 +156,15 @@ app.get("/history", async (request) => {
   const queryIndex = request.url.indexOf("?");
   const query = queryIndex >= 0 ? request.url.slice(queryIndex) : "";
   const res = await fetch(`http://127.0.0.1:${internalPort}/internal/history${query}`, {
+    signal: AbortSignal.timeout(5_000)
+  });
+  return res.json();
+});
+
+app.get("/participant-samples", async (request) => {
+  const queryIndex = request.url.indexOf("?");
+  const query = queryIndex >= 0 ? request.url.slice(queryIndex) : "";
+  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/participant-samples${query}`, {
     signal: AbortSignal.timeout(5_000)
   });
   return res.json();

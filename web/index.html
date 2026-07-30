@@ -154,6 +154,8 @@
       .topbar .pill { border-color: #ffffff; color: #ffffff; background: transparent; }
       .topbar .pill.ok { background: var(--accent); border-color: var(--accent); color: #ffffff; }
       .topbar .pill.warn { background: #ffffff; color: var(--ink); border-color: #ffffff; }
+      .topbar a.pill { text-decoration: none; }
+      .topbar a.pill:hover { background: #ffffff; color: var(--ink); }
 
       .session-standdown-pill {
         display: none;
@@ -267,7 +269,10 @@
   <body>
     <header class="topbar">
       <div class="brand">Admiral<span class="brand-sub">Presence handoff controller</span></div>
-      <div id="hbState" class="pill">Heartbeat: unknown</div>
+      <div class="row">
+        <a class="pill" href="/participant-stats">Participant stats</a>
+        <div id="hbState" class="pill">Heartbeat: unknown</div>
+      </div>
     </header>
 
     <main class="shell">
@@ -311,6 +316,8 @@
           <div id="upcomingClass" class="pill">Upcoming: --</div>
           <div id="emailBudgetPill" class="pill">Emails: --</div>
           <div id="scheduleSourcePill" class="pill">Schedule: --</div>
+          <div id="currentRoomPill" class="pill" style="display:none"></div>
+          <div id="roomWatchPill" class="pill warn" style="display:none"></div>
           <div id="sessionStanddownPill" class="session-standdown-pill"></div>
         </div>
 

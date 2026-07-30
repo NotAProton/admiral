@@ -238,6 +238,39 @@ function renderStatus(status) {
       (status.scheduleUrl ? ` · ${status.scheduleUrl}` : "");
   }
 
+  // Current room pill — adopted rooms (empty-room sweep) show where Admiral moved from
+  const roomPill = document.getElementById("currentRoomPill");
+  if (roomPill) {
+    if (status.currentRoom) {
+      roomPill.textContent = status.currentRoom.adopted
+        ? `Covering: ${status.currentRoom.className} (moved from ${status.currentRoom.adoptedFromClassName})`
+        : `In room: ${status.currentRoom.className}`;
+      roomPill.style.display = "";
+    } else {
+      roomPill.style.display = "none";
+    }
+  }
+
+  // Room watch pill — empty-room evaluation progress and sweep retry countdown
+  const watchPill = document.getElementById("roomWatchPill");
+  if (watchPill) {
+    const rw = status.roomWatch;
+    let text = "";
+    if (rw && rw.enabled) {
+      if (rw.belowThresholdSince) {
+        const mins = Math.max(0, Math.round((Date.now() - new Date(rw.belowThresholdSince).getTime()) / 60000));
+        text = `Room looks empty (${status.participantCount}/${rw.minParticipants}) — watching ${mins}m`;
+      } else if (rw.nextSweepRetryAt) {
+        const secs = Math.max(0, Math.round((new Date(rw.nextSweepRetryAt).getTime() - Date.now()) / 1000));
+        text = `No populated room — rechecking in ${formatDuration(secs)}`;
+      } else if (status.state === "InRoom" && !rw.scrapeOk) {
+        text = "Participant scrape failing";
+      }
+    }
+    watchPill.textContent = text;
+    watchPill.style.display = text ? "" : "none";
+  }
+
   renderCountdown();
 }
 

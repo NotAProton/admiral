@@ -47,6 +47,16 @@ function stubStatus(): StatusResponse {
     },
     participantCount: 0,
     participantNames: [],
+    currentRoom: null,
+    roomWatch: {
+      enabled: true,
+      minParticipants: 3,
+      scrapeOk: false,
+      belowThresholdSince: null,
+      sweepsThisSlot: 0,
+      maxSweepsPerSlot: 6,
+      nextSweepRetryAt: null
+    },
     duplicateConfirmed: false,
     duplicateStreak: 0,
     lastHeartbeatAgeSeconds: null,

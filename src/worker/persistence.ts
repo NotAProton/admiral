@@ -1,5 +1,5 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
-import type { ActiveSlot, HistoryEvent } from "../shared/types.js";
+import type { ActiveSlot, HistoryEvent, ParticipantSample } from "../shared/types.js";
 
 export type PersistedWorkerState = {
   standdown: boolean;
@@ -29,6 +29,10 @@ export type AppendEventInput = {
 const EVENT_RETENTION_MS = 180 * 24 * 60 * 60 * 1000; // 180 days
 const EVENT_MAX_ROWS = 10_000;
 const EMAIL_LOG_RETENTION_MS = 45 * 24 * 60 * 60 * 1000; // 45 days — covers month-boundary queries for the monthly budget
+// Participant samples are high-volume (every few minutes per session); two
+// weeks is plenty for the stats dashboard and post-incident forensics.
+const PARTICIPANT_SAMPLE_RETENTION_MS =
+  Number(process.env.PARTICIPANT_SAMPLE_RETENTION_DAYS ?? 14) * 24 * 60 * 60 * 1000;
 
 type WorkerStateRow = {
   standdown: number;
@@ -50,6 +54,16 @@ type EventRow = {
   course_id: string | null;
   class_name: string | null;
   payload_json: string | null;
+};
+
+type ParticipantSampleRow = {
+  id: number;
+  ts_ms: number;
+  slot_key: string | null;
+  course_id: string;
+  class_name: string | null;
+  participant_count: number;
+  adopted: number;
 };
 
 export type OutboxRow = {
@@ -466,6 +480,73 @@ export class WorkerPersistence {
       )
       .get(`${prefix}%`) as unknown as { n: number };
     return row.n;
+  }
+
+  // ── Participant-count time series (participant_samples) ───────────────────
+
+  insertParticipantSample(input: {
+    tsMs?: number;
+    slotKey: string | null;
+    courseId: string;
+    className: string | null;
+    participantCount: number;
+    adopted: boolean;
+  }): void {
+    const tsMs = input.tsMs ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO participant_samples (ts_ms, slot_key, course_id, class_name, participant_count, adopted)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        tsMs,
+        input.slotKey,
+        input.courseId,
+        input.className,
+        input.participantCount,
+        input.adopted ? 1 : 0
+      );
+    // Inline retention prune on every write, same pattern as the email ledger.
+    this.db
+      .prepare("DELETE FROM participant_samples WHERE ts_ms < ?")
+      .run(tsMs - PARTICIPANT_SAMPLE_RETENTION_MS);
+  }
+
+  /** Oldest-first within the window — the shape the /participant-stats chart wants. */
+  listParticipantSamples(query: {
+    fromMs: number;
+    toMs: number;
+    courseId?: string;
+    limit: number;
+  }): ParticipantSample[] {
+    const rows = (
+      query.courseId
+        ? this.db
+            .prepare(
+              `SELECT * FROM participant_samples
+               WHERE ts_ms >= ? AND ts_ms <= ? AND course_id = ?
+               ORDER BY ts_ms ASC LIMIT ?`
+            )
+            .all(query.fromMs, query.toMs, query.courseId, query.limit)
+        : this.db
+            .prepare(
+              `SELECT * FROM participant_samples
+               WHERE ts_ms >= ? AND ts_ms <= ?
+               ORDER BY ts_ms ASC LIMIT ?`
+            )
+            .all(query.fromMs, query.toMs, query.limit)
+    ) as unknown as ParticipantSampleRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      tsMs: row.ts_ms,
+      tsIso: new Date(row.ts_ms).toISOString(),
+      slotKey: row.slot_key,
+      courseId: row.course_id,
+      className: row.class_name,
+      participantCount: row.participant_count,
+      adopted: row.adopted === 1
+    }));
   }
 
   // ── Retention ─────────────────────────────────────────────────────────────
