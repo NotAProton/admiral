@@ -84,6 +84,8 @@ export type EmailBudgetSnapshot = {
   suppressedToday: number;
 };
 
+export type ScheduleSource = "env" | "file" | "url" | "cache";
+
 export type StatusResponse = {
   state: AdmiralState;
   standdown: boolean;
@@ -93,6 +95,9 @@ export type StatusResponse = {
   upcomingSlot: ActiveSlot | null;
   currentIstTime: string;
   schedule: AdmiralConfig;
+  scheduleSource: ScheduleSource;
+  scheduleLoadedAt: string;
+  scheduleUrl: string | null;
   participantCount: number;
   participantNames: string[];
   duplicateConfirmed: boolean;

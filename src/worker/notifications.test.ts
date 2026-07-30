@@ -55,6 +55,9 @@ function stubStatus(): StatusResponse {
     bbbJoinUrl: null,
     joinBackoffActive: false,
     joinBackoffRemainingSeconds: null,
+    scheduleSource: "file",
+    scheduleLoadedAt: new Date().toISOString(),
+    scheduleUrl: null,
     emailBudget: null
   };
 }

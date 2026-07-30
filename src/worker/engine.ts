@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
-import { envBoolean, envNumber, loadConfig } from "../shared/config.js";
+import { envBoolean, envNumber } from "../shared/config.js";
 import { readdir, rm, stat } from "node:fs/promises";
 import type {
   ActiveSlot,
@@ -17,6 +17,7 @@ import { HeartbeatTracker } from "./heartbeat.js";
 import type { WorkerPersistence } from "./persistence.js";
 import { NotificationCenter } from "./notifications.js";
 import { getActiveSlot, getCurrentIstIso, getMostRecentEndedSlot, getUpcomingSlot } from "./schedule.js";
+import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { nextTransition } from "./stateMachine.js";
 
@@ -26,6 +27,9 @@ export class AdmiralEngine {
   private readonly bbb = new BbbSession();
 
   private config!: AdmiralConfig;
+  private scheduleSource: import("../shared/types.js").ScheduleSource = "file";
+  private scheduleLoadedAt = new Date().toISOString();
+  private scheduleUrl: string | null = null;
   private state: AdmiralState = "Out";
   private standdown = false;
   private reason = "Booting";
@@ -75,6 +79,8 @@ export class AdmiralEngine {
 
   private ticker: NodeJS.Timeout | null = null;
   private tickInFlight = false;
+  private scheduleLoader: ScheduleLoader | null = null;
+  private schedulePoller: NodeJS.Timeout | null = null;
 
   private readonly dryRun: boolean;
   private readonly headless: boolean;
@@ -93,7 +99,10 @@ export class AdmiralEngine {
   }
 
   async start(): Promise<void> {
-    this.config = await loadConfig(resolve(this.configPath));
+    this.scheduleLoader = new ScheduleLoader(resolve(this.configPath));
+    const initial = await this.scheduleLoader.loadInitial();
+    this.applyScheduleResult(initial);
+    this.scheduleUrl = process.env.SCHEDULE_URL?.trim() ?? null;
 
     // Restore durable control state (standdowns, join backoff) from the database.
     const persisted = this.persistence.loadWorkerState();
@@ -166,11 +175,26 @@ export class AdmiralEngine {
     // in the background so the internal API can listen immediately. Otherwise
     // heartbeats and health checks are dead for up to ~2 min during a first join.
     void this.tick();
+
+    // If a remote schedule URL is configured, upgrade to it as soon as possible
+    // and poll for changes. This lets the user edit the schedule from a phone
+    // browser (e.g. a GitHub gist) without SSH.
+    if (this.scheduleLoader?.hasRemoteUrl()) {
+      void this.reloadScheduleFromUrl();
+      const pollSeconds = this.scheduleLoader.getPollIntervalSeconds();
+      if (pollSeconds > 0) {
+        this.schedulePoller = setInterval(() => {
+          void this.reloadScheduleFromUrl();
+        }, pollSeconds * 1000);
+      }
+    }
   }
 
   async stop(): Promise<void> {
     if (this.ticker) clearInterval(this.ticker);
     this.ticker = null;
+    if (this.schedulePoller) clearInterval(this.schedulePoller);
+    this.schedulePoller = null;
     await this.center.stop().catch(() => undefined);
     await this.bbb.leave().catch(() => undefined);
     // Clean shutdown: the room session is over, so clear the durable marker to
@@ -278,6 +302,9 @@ export class AdmiralEngine {
       bbbJoinUrl: this.bbbJoinUrl,
       joinBackoffActive: this.joinBackoffUntilMs > Date.now(),
       joinBackoffRemainingSeconds: backoffRemaining,
+      scheduleSource: this.scheduleSource,
+      scheduleLoadedAt: this.scheduleLoadedAt,
+      scheduleUrl: this.scheduleUrl,
       emailBudget: this.center.getBudgetSnapshot()
     };
   }
@@ -730,6 +757,54 @@ export class AdmiralEngine {
         // ignore individual file errors — pruning is best-effort
       }
     }
+  }
+
+  private async reloadScheduleFromUrl(): Promise<void> {
+    if (!this.scheduleLoader) return;
+    try {
+      const result = await this.scheduleLoader.pollFromUrl();
+      if ("keepCurrent" in result) {
+        this.reason = `Schedule URL fetch failed: ${result.error}`;
+        this.persistence.appendEvent({
+          kind: "schedule_reload_failed",
+          payload: { error: result.error, url: this.scheduleUrl }
+        });
+        this.emitStatus();
+        return;
+      }
+
+      if (result.config === this.config || JSON.stringify(result.config) === JSON.stringify(this.config)) {
+        this.scheduleLoadedAt = result.loadedAt.toISOString();
+        this.scheduleSource = result.source;
+        return;
+      }
+
+      this.applyScheduleResult(result);
+      this.reason = "Schedule reloaded from URL";
+      this.persistence.appendEvent({
+        kind: "schedule_reloaded",
+        payload: {
+          source: result.source,
+          url: this.scheduleUrl,
+          courses: result.config.courses.map((c) => ({ courseId: c.courseId, className: c.className }))
+        }
+      });
+      this.emitStatus();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.reason = `Schedule reload error: ${message}`;
+      this.persistence.appendEvent({
+        kind: "schedule_reload_failed",
+        payload: { error: message, url: this.scheduleUrl }
+      });
+      this.emitStatus();
+    }
+  }
+
+  private applyScheduleResult(result: ScheduleLoaderResult): void {
+    this.config = result.config;
+    this.scheduleSource = result.source;
+    this.scheduleLoadedAt = result.loadedAt.toISOString();
   }
 
   /** Snapshots durable control state to SQLite so it survives restarts. */

@@ -223,6 +223,21 @@ function renderStatus(status) {
       (status.emailBudget.suppressedToday > 0 ? ` · ${status.emailBudget.suppressedToday} muted` : "");
   }
 
+  // Schedule source pill (env/file/url/cache + loaded-at time)
+  const scheduleSourceEl = document.getElementById("scheduleSourcePill");
+  if (scheduleSourceEl) {
+    const when = status.scheduleLoadedAt
+      ? new Intl.DateTimeFormat("en-IN", {
+          timeZone: "Asia/Kolkata",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false
+        }).format(new Date(status.scheduleLoadedAt))
+      : "--";
+    scheduleSourceEl.textContent = `Schedule: ${status.scheduleSource} @ ${when}` +
+      (status.scheduleUrl ? ` · ${status.scheduleUrl}` : "");
+  }
+
   renderCountdown();
 }
 
