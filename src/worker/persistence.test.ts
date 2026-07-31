@@ -186,6 +186,57 @@ test("participant samples insert, filter by window and course, and prune", () =>
   assert.equal(limited.length, 1);
 });
 
+test("day overrides round-trip, isolate by date, and delete", () => {
+  const p = memoryPersistence();
+  const baseMs = Date.parse("2026-07-31T09:00:00+05:30");
+  const id1 = p.addDayOverride({
+    date: "2026-07-31",
+    ops: { swap: [{ a: "10:00", b: "11:00" }] },
+    createdMs: baseMs
+  });
+  const id2 = p.addDayOverride({
+    date: "2026-07-31",
+    ops: { cancel: ["cbe411"] },
+    createdMs: baseMs + 1
+  });
+  p.addDayOverride({
+    date: "2026-08-01",
+    ops: { add: [{ courseId: "vapt", start: "14:00", end: "15:00" }] },
+    createdMs: baseMs + 2
+  });
+
+  const day1 = p.listDayOverrides("2026-07-31");
+  assert.equal(day1.length, 2);
+  assert.equal(day1[0]?.id, id1);
+  assert.equal(day1[1]?.id, id2);
+
+  const day2 = p.listDayOverrides("2026-08-01");
+  assert.equal(day2.length, 1);
+
+  assert.equal(p.deleteDayOverride(id1), true);
+  assert.equal(p.deleteDayOverride(id1), false);
+  assert.equal(p.listDayOverrides("2026-07-31").length, 1);
+});
+
+test("day overrides garbage-collect past dates on insert", () => {
+  const p = memoryPersistence();
+  const nowMs = Date.parse("2026-07-31T08:00:00+05:30");
+
+  p.addDayOverride({
+    date: "2026-07-30",
+    ops: { cancel: ["old"] },
+    createdMs: nowMs - 60_000
+  });
+  p.addDayOverride({
+    date: "2026-07-31",
+    ops: { cancel: ["today"] },
+    createdMs: nowMs
+  });
+
+  assert.equal(p.listDayOverrides("2026-07-30").length, 0);
+  assert.equal(p.listDayOverrides("2026-07-31").length, 1);
+});
+
 test("state survives close and reopen of a file-backed database", () => {
   const dir = mkdtempSync(join(tmpdir(), "admiral-db-test-"));
   try {
@@ -214,7 +265,7 @@ test("state survives close and reopen of a file-backed database", () => {
     // Reopening runs migrations idempotently: schema version stays applied.
     const db = openDatabase(dbPath);
     const row = db.prepare("PRAGMA user_version").get() as unknown as { user_version: number };
-    assert.equal(row.user_version, 5);
+    assert.equal(row.user_version, 6);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

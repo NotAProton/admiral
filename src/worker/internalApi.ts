@@ -23,6 +23,24 @@ const participantSamplesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(2000).default(500)
 });
 
+const dayOverridesQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
+});
+
+const dayOverrideSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  op: z.enum(["cancel", "swap", "add"]),
+  courseId: z.string().min(1).optional(),
+  a: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  b: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
+});
+
+const dayOverrideDeleteSchema = z.object({
+  id: z.number().int().positive()
+});
+
 function writeSse(reply: FastifyReply, event: string, payload: StatusResponse): void {
   reply.raw.write(`event: ${event}\n`);
   reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -71,6 +89,38 @@ export async function startInternalApi(engine: AdmiralEngine, port: number): Pro
         courseId: query.courseId,
         limit: query.limit
       });
+    }
+  );
+
+  app.get(
+    "/internal/day-overrides",
+    async (request: FastifyRequest<{ Querystring: { date?: string } }>) => {
+      const query = dayOverridesQuerySchema.parse(request.query ?? {});
+      return { overrides: engine.listDayOverrides(query.date) };
+    }
+  );
+
+  app.post(
+    "/internal/day-override",
+    async (request: FastifyRequest<{ Body: z.infer<typeof dayOverrideSchema> }>, reply) => {
+      const body = dayOverrideSchema.parse(request.body);
+      const result = engine.addDayOverride(body);
+      if (!result.ok) {
+        return reply.code(400).send(result);
+      }
+      return result;
+    }
+  );
+
+  app.post(
+    "/internal/day-override-delete",
+    async (request: FastifyRequest<{ Body: z.infer<typeof dayOverrideDeleteSchema> }>, reply) => {
+      const body = dayOverrideDeleteSchema.parse(request.body);
+      const ok = engine.deleteDayOverride(body.id);
+      if (!ok) {
+        return reply.code(404).send({ ok: false });
+      }
+      return { ok: true };
     }
   );
 

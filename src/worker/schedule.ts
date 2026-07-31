@@ -1,4 +1,9 @@
-import type { ActiveSlot, AdmiralConfig, CourseConfig, DayName } from "../shared/types.js";
+import type {
+  ActiveSlot,
+  AdmiralConfig,
+  DayName,
+  DayOverrideOps
+} from "../shared/types.js";
 
 const ADMIRAL_TIMEZONE = "Asia/Kolkata";
 // Asia/Kolkata has no daylight-saving shifts, so a fixed offset is safe.
@@ -23,7 +28,14 @@ const dayMap: Record<string, DayName> = {
 
 const dayOrder: DayName[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-function hhmmToMinutes(value: string): number {
+export type OpsForDate = (dateKey: string) => DayOverrideOps[];
+
+export type DayOverrideIssue = {
+  op: "cancel" | "swap" | "add";
+  detail: string;
+};
+
+export function hhmmToMinutes(value: string): number {
   const [h, m] = value.split(":").map(Number);
   return h * 60 + m;
 }
@@ -72,36 +84,113 @@ export function getCurrentIstDay(): DayName {
   return nowInIst().day;
 }
 
-function maybeActiveCourse(course: CourseConfig, day: DayName, nowMinutes: number, nowIso: string): ActiveSlot | null {
-  for (const slot of course.weeklySlots) {
-    if (!slot.days.includes(day)) continue;
-
-    const startMinutes = hhmmToMinutes(slot.start);
-    const endMinutes = hhmmToMinutes(slot.end);
-    if (nowMinutes < startMinutes || nowMinutes >= endMinutes) continue;
-
-    const datePrefix = nowIso.slice(0, 10);
-    return {
-      courseId: course.courseId,
-      className: course.className,
-      classPageUrl: course.classPageUrl,
-      joinLinkText: course.joinLinkText,
-      myDisplayName: course.myDisplayName,
-      startedAt: istIso(datePrefix, slot.start),
-      endsAt: istIso(datePrefix, slot.end)
-    };
-  }
-
-  return null;
+function dateKeyForOffset(nowMs: number, dayOffset: number): string {
+  const date = new Date(nowMs + dayOffset * 24 * 60 * 60 * 1000);
+  const parts = formatPartsInIst(date);
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-export function getActiveSlot(config: AdmiralConfig): ActiveSlot | null {
-  const now = nowInIst();
-  for (const course of config.courses) {
-    const active = maybeActiveCourse(course, now.day, now.minutes, now.iso);
-    if (active) return active;
+function dayNameForDateKey(dateKey: string): DayName | null {
+  const date = new Date(`${dateKey}T12:00:00+05:30`);
+  const values = formatPartsInIst(date);
+  return dayMap[values.weekday] ?? null;
+}
+
+export function getDaySlots(
+  config: AdmiralConfig,
+  dateKey: string,
+  opsList: DayOverrideOps[] = []
+): { slots: ActiveSlot[]; issues: DayOverrideIssue[] } {
+  const issues: DayOverrideIssue[] = [];
+  const weekday = dayNameForDateKey(dateKey);
+  if (!weekday) {
+    return { slots: [], issues: [{ op: "add", detail: `Unable to resolve weekday for ${dateKey}` }] };
   }
-  return null;
+
+  const slots: ActiveSlot[] = [];
+  for (const course of config.courses) {
+    for (const weeklySlot of course.weeklySlots) {
+      if (!weeklySlot.days.includes(weekday)) continue;
+      slots.push({
+        courseId: course.courseId,
+        className: course.className,
+        classPageUrl: course.classPageUrl,
+        joinLinkText: course.joinLinkText,
+        myDisplayName: course.myDisplayName,
+        startedAt: istIso(dateKey, weeklySlot.start),
+        endsAt: istIso(dateKey, weeklySlot.end)
+      });
+    }
+  }
+
+  for (const ops of opsList) {
+    for (const courseId of ops.cancel ?? []) {
+      const before = slots.length;
+      for (let i = slots.length - 1; i >= 0; i -= 1) {
+        if (slots[i]?.courseId === courseId) slots.splice(i, 1);
+      }
+      if (before === slots.length) {
+        issues.push({ op: "cancel", detail: `Cancel unmatched on ${dateKey}: ${courseId}` });
+      }
+    }
+
+    for (const pair of ops.swap ?? []) {
+      const aIndex = slots.findIndex((slot) => slot.startedAt.slice(11, 16) === pair.a);
+      const bIndex = slots.findIndex((slot) => slot.startedAt.slice(11, 16) === pair.b);
+      if (aIndex < 0 || bIndex < 0) {
+        issues.push({ op: "swap", detail: `Swap unmatched on ${dateKey}: ${pair.a} ↔ ${pair.b}` });
+        continue;
+      }
+      const a = slots[aIndex]!;
+      const b = slots[bIndex]!;
+      const aStart = a.startedAt;
+      const aEnd = a.endsAt;
+      a.startedAt = b.startedAt;
+      a.endsAt = b.endsAt;
+      b.startedAt = aStart;
+      b.endsAt = aEnd;
+    }
+
+    for (const add of ops.add ?? []) {
+      const course = config.courses.find((c) => c.courseId === add.courseId);
+      if (!course) {
+        issues.push({ op: "add", detail: `Add unmatched on ${dateKey}: ${add.courseId}` });
+        continue;
+      }
+      slots.push({
+        courseId: course.courseId,
+        className: course.className,
+        classPageUrl: course.classPageUrl,
+        joinLinkText: course.joinLinkText,
+        myDisplayName: course.myDisplayName,
+        startedAt: istIso(dateKey, add.start),
+        endsAt: istIso(dateKey, add.end)
+      });
+    }
+  }
+
+  slots.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  return { slots, issues };
+}
+
+export function getActiveSlot(config: AdmiralConfig, opsForDate?: OpsForDate): ActiveSlot | null {
+  const now = nowInIst();
+  const nowMs = Date.parse(now.iso);
+  const dateKey = now.iso.slice(0, 10);
+  const daySlots = getDaySlots(config, dateKey, opsForDate?.(dateKey) ?? []).slots;
+
+  let best: ActiveSlot | null = null;
+  let bestStartMs = Number.NEGATIVE_INFINITY;
+  for (const slot of daySlots) {
+    const start = Date.parse(slot.startedAt);
+    const end = Date.parse(slot.endsAt);
+    if (start <= nowMs && nowMs < end && start >= bestStartMs) {
+      best = slot;
+      bestStartMs = start;
+    }
+  }
+
+  return best;
 }
 
 /**
@@ -109,93 +198,41 @@ export function getActiveSlot(config: AdmiralConfig): ActiveSlot | null {
  * Used by the worker to recover a missed session-summary notification after
  * a restart that happened right at a slot boundary.
  */
-export function getMostRecentEndedSlot(config: AdmiralConfig): ActiveSlot | null {
+export function getMostRecentEndedSlot(config: AdmiralConfig, opsForDate?: OpsForDate): ActiveSlot | null {
   const now = nowInIst();
-  const nowMinutes = now.minutes;
-  const nowDayIndex = dayOrder.indexOf(now.day);
-  const nowMs = Date.now();
+  const nowMs = Date.parse(now.iso);
   const sixHoursMs = 6 * 60 * 60 * 1000;
 
+  const todayKey = now.iso.slice(0, 10);
+  const yesterdayKey = dateKeyForOffset(Date.now(), -1);
+  const slots = [
+    ...getDaySlots(config, yesterdayKey, opsForDate?.(yesterdayKey) ?? []).slots,
+    ...getDaySlots(config, todayKey, opsForDate?.(todayKey) ?? []).slots
+  ];
+
   let best: { endedAtMs: number; slot: ActiveSlot } | null = null;
-
-  for (const course of config.courses) {
-    for (const weeklySlot of course.weeklySlots) {
-      for (const day of weeklySlot.days) {
-        const slotDayIndex = dayOrder.indexOf(day);
-        const endMin = hhmmToMinutes(weeklySlot.end);
-
-        let datePrefix: string;
-        if (slotDayIndex === nowDayIndex) {
-          if (endMin > nowMinutes) continue; // not ended yet today
-          datePrefix = now.iso.slice(0, 10);
-        } else {
-          let deltaBack = (nowDayIndex - slotDayIndex + 7) % 7;
-          if (deltaBack === 0) deltaBack = 7;
-          const candidateDate = new Date(nowMs - deltaBack * 24 * 60 * 60 * 1000);
-          const parts = formatPartsInIst(candidateDate);
-          datePrefix = `${parts.year}-${parts.month}-${parts.day}`;
-        }
-
-        const slot: ActiveSlot = {
-          courseId: course.courseId,
-          className: course.className,
-          classPageUrl: course.classPageUrl,
-          joinLinkText: course.joinLinkText,
-          myDisplayName: course.myDisplayName,
-          startedAt: istIso(datePrefix, weeklySlot.start),
-          endsAt: istIso(datePrefix, weeklySlot.end)
-        };
-        const endedAtMs = new Date(slot.endsAt).getTime();
-        if (endedAtMs > nowMs) continue;
-        if (nowMs - endedAtMs > sixHoursMs) continue;
-        if (!best || endedAtMs > best.endedAtMs) best = { endedAtMs, slot };
-      }
-    }
+  for (const slot of slots) {
+    const endedAtMs = Date.parse(slot.endsAt);
+    if (endedAtMs > nowMs) continue;
+    if (nowMs - endedAtMs > sixHoursMs) continue;
+    if (!best || endedAtMs > best.endedAtMs) best = { endedAtMs, slot };
   }
 
   return best?.slot ?? null;
 }
 
-export function getUpcomingSlot(config: AdmiralConfig): ActiveSlot | null {
+export function getUpcomingSlot(config: AdmiralConfig, opsForDate?: OpsForDate): ActiveSlot | null {
   const now = nowInIst();
-  const nowDate = new Date();
-  const nowDayIndex = dayOrder.indexOf(now.day);
+  const nowMs = Date.parse(now.iso);
+  const nowDateMs = Date.now();
 
-  let best: { deltaMinutes: number; slot: ActiveSlot } | null = null;
-
-  for (const course of config.courses) {
-    for (const weeklySlot of course.weeklySlots) {
-      for (const day of weeklySlot.days) {
-        const slotDayIndex = dayOrder.indexOf(day);
-        let dayDelta = (slotDayIndex - nowDayIndex + 7) % 7;
-
-        const startMin = hhmmToMinutes(weeklySlot.start);
-        if (dayDelta === 0 && startMin <= now.minutes) {
-          dayDelta = 7;
-        }
-
-        const deltaMinutes = dayDelta * 1440 + (startMin - now.minutes);
-
-        const candidateDate = new Date(nowDate.getTime() + dayDelta * 24 * 60 * 60 * 1000);
-        const parts = formatPartsInIst(candidateDate);
-        const datePrefix = `${parts.year}-${parts.month}-${parts.day}`;
-
-        const slot: ActiveSlot = {
-          courseId: course.courseId,
-          className: course.className,
-          classPageUrl: course.classPageUrl,
-          joinLinkText: course.joinLinkText,
-          myDisplayName: course.myDisplayName,
-          startedAt: istIso(datePrefix, weeklySlot.start),
-          endsAt: istIso(datePrefix, weeklySlot.end)
-        };
-
-        if (!best || deltaMinutes < best.deltaMinutes) {
-          best = { deltaMinutes, slot };
-        }
-      }
+  for (let dayOffset = 0; dayOffset < dayOrder.length; dayOffset += 1) {
+    const dateKey = dayOffset === 0 ? now.iso.slice(0, 10) : dateKeyForOffset(nowDateMs, dayOffset);
+    const daySlots = getDaySlots(config, dateKey, opsForDate?.(dateKey) ?? []).slots;
+    for (const slot of daySlots) {
+      if (Date.parse(slot.startedAt) > nowMs) return slot;
     }
   }
 
-  return best?.slot ?? null;
+  return null;
 }

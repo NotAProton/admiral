@@ -4,9 +4,11 @@ import { envBoolean, envNumber } from "../shared/config.js";
 import { readdir, rm, stat } from "node:fs/promises";
 import type {
   ActiveSlot,
+  AppliedDayOverride,
   AdmiralConfig,
   AdmiralState,
   CourseConfig,
+  DayOverrideOps,
   HistoryEvent,
   OverrideAction,
   ParticipantSample,
@@ -14,11 +16,20 @@ import type {
   SessionStanddown,
   StatusResponse
 } from "../shared/types.js";
+import { istDateKey } from "../shared/istTime.js";
 import { BbbSession, runtimePrefixForSlot } from "./bbbSession.js";
 import { HeartbeatTracker } from "./heartbeat.js";
 import type { WorkerPersistence } from "./persistence.js";
 import { NotificationCenter } from "./notifications.js";
-import { getActiveSlot, getCurrentIstDay, getCurrentIstIso, getMostRecentEndedSlot, getUpcomingSlot } from "./schedule.js";
+import {
+  getActiveSlot,
+  getCurrentIstDay,
+  getCurrentIstIso,
+  getDaySlots,
+  getMostRecentEndedSlot,
+  getUpcomingSlot,
+  type DayOverrideIssue
+} from "./schedule.js";
 import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { nextTransition } from "./stateMachine.js";
@@ -173,8 +184,8 @@ export class AdmiralEngine {
     // stale stand-down until the first tick runs the regular GC.
     if (this.sessionStanddownSlot) {
       const key = this.sessionKey(this.sessionStanddownSlot);
-      const now = getActiveSlot(this.config);
-      const upcoming = getUpcomingSlot(this.config);
+      const now = getActiveSlot(this.config, (d) => this.opsForDate(d));
+      const upcoming = getUpcomingSlot(this.config, (d) => this.opsForDate(d));
       const stillRelevant =
         (now && this.sessionKey(now) === key) ||
         (upcoming && this.sessionKey(upcoming) === key);
@@ -192,7 +203,7 @@ export class AdmiralEngine {
     // Recover a session summary that may have been missed if the worker
     // restarted right at a slot boundary, and seed slot-end tracking.
     this.recoverMissedSummary();
-    this.lastActiveSlotForSummary = getActiveSlot(this.config);
+    this.lastActiveSlotForSummary = getActiveSlot(this.config, (d) => this.opsForDate(d));
 
     // Boot-time housekeeping: prune stale outbox rows (a multi-hour outage
     // should not flush yesterday's morning plan) and old debug artifacts
@@ -314,6 +325,9 @@ export class AdmiralEngine {
   getStatus(): StatusResponse {
     const heartbeatAge = this.heartbeat.getNewestAgeSeconds();
     const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
+    const todayKey = istDateKey(Date.now());
+    const todaySlots = getDaySlots(this.config, todayKey, this.opsForDate(todayKey)).slots;
+    const todayOverrides = this.persistence.listDayOverrides(todayKey);
     const backoffRemaining = this.joinBackoffUntilMs > Date.now()
       ? Math.ceil((this.joinBackoffUntilMs - Date.now()) / 1000)
       : null;
@@ -333,6 +347,8 @@ export class AdmiralEngine {
       upcomingSlot: this.upcomingSlot,
       currentIstTime: getCurrentIstIso(),
       schedule: this.config,
+      todaySlots,
+      todayOverrides,
       participantCount: this.participantSnapshot.count,
       participantNames: this.participantSnapshot.names,
       currentRoom: this.currentRoomSlot
@@ -377,6 +393,119 @@ export class AdmiralEngine {
     return this.persistence.listEvents(limit, beforeId);
   }
 
+  listDayOverrides(date?: string): AppliedDayOverride[] {
+    return this.persistence.listDayOverrides(date ?? istDateKey(Date.now()));
+  }
+
+  addDayOverride(input: {
+    date?: string;
+    op: "cancel" | "swap" | "add";
+    courseId?: string;
+    a?: string;
+    b?: string;
+    start?: string;
+    end?: string;
+  }): { ok: true; id: number; issues: DayOverrideIssue[] } | { ok: false; error: string } {
+    const date = input.date ?? istDateKey(Date.now());
+    const dayRe = /^\d{4}-\d{2}-\d{2}$/;
+    const hhmmRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (!dayRe.test(date)) {
+      return { ok: false, error: "Invalid date format (expected YYYY-MM-DD)" };
+    }
+
+    let ops: DayOverrideOps;
+    let summary: string;
+
+    if (input.op === "cancel") {
+      if (!input.courseId) return { ok: false, error: "courseId is required for cancel" };
+      const course = this.config.courses.find((c) => c.courseId === input.courseId);
+      if (!course) return { ok: false, error: `Unknown courseId: ${input.courseId}` };
+      ops = { cancel: [input.courseId] };
+      summary = `Cancelled ${course.courseId} ${course.className}`;
+    } else if (input.op === "swap") {
+      if (!input.a || !input.b) return { ok: false, error: "a and b are required for swap" };
+      if (!hhmmRe.test(input.a) || !hhmmRe.test(input.b)) {
+        return { ok: false, error: "a and b must be HH:MM" };
+      }
+      ops = { swap: [{ a: input.a, b: input.b }] };
+      summary = `Swapped ${input.a} ↔ ${input.b}`;
+    } else {
+      if (!input.courseId) return { ok: false, error: "courseId is required for add" };
+      if (!input.start || !input.end) return { ok: false, error: "start and end are required for add" };
+      if (!hhmmRe.test(input.start) || !hhmmRe.test(input.end)) {
+        return { ok: false, error: "start and end must be HH:MM" };
+      }
+      if (input.start >= input.end) {
+        return { ok: false, error: "start must be earlier than end" };
+      }
+      const course = this.config.courses.find((c) => c.courseId === input.courseId);
+      if (!course) return { ok: false, error: `Unknown courseId: ${input.courseId}` };
+      ops = { add: [{ courseId: input.courseId, start: input.start, end: input.end }] };
+      summary = `Added ${course.courseId} ${course.className} ${input.start}-${input.end}`;
+    }
+
+    const id = this.persistence.addDayOverride({ date, ops, source: "pwa" });
+    const issues = getDaySlots(this.config, date, this.opsForDate(date)).issues;
+
+    this.persistence.appendEvent({
+      kind: "day_override_applied",
+      payload: {
+        id,
+        date,
+        op: input.op,
+        courseId: input.courseId,
+        a: input.a,
+        b: input.b,
+        start: input.start,
+        end: input.end,
+        issues
+      }
+    });
+
+    const todayKey = istDateKey(Date.now());
+    this.center.enqueue({
+      kind: "day_override",
+      payload: {
+        date,
+        summary: [summary],
+        issues,
+        ...(date === todayKey
+          ? { todaySlots: getDaySlots(this.config, date, this.opsForDate(date)).slots }
+          : {})
+      }
+    });
+    this.emitStatus();
+    return { ok: true, id, issues };
+  }
+
+  deleteDayOverride(id: number): boolean {
+    const row = this.persistence.getDayOverride(id);
+    const ok = this.persistence.deleteDayOverride(id);
+    if (!ok) return false;
+
+    const date = row?.date ?? istDateKey(Date.now());
+    this.persistence.appendEvent({
+      kind: "day_override_removed",
+      payload: { id, date }
+    });
+
+    const todayKey = istDateKey(Date.now());
+    this.center.enqueue({
+      kind: "day_override",
+      payload: {
+        date,
+        summary: [`Removed override #${id}`],
+        issues: [],
+        ...(date === todayKey
+          ? { todaySlots: getDaySlots(this.config, date, this.opsForDate(date)).slots }
+          : {})
+      }
+    });
+
+    this.emitStatus();
+    return true;
+  }
+
   /** Participant-count time series for the /participant-stats dashboard. */
   getParticipantSamples(query: { fromMs?: number; toMs?: number; courseId?: string; limit?: number }): {
     samples: ParticipantSample[];
@@ -407,8 +536,8 @@ export class AdmiralEngine {
     try {
       this.heartbeat.pruneOlderThan(this.config.heartbeat.missingThresholdSeconds * 12);
 
-      this.activeSlot = getActiveSlot(this.config);
-      this.upcomingSlot = getUpcomingSlot(this.config);
+      this.activeSlot = getActiveSlot(this.config, (d) => this.opsForDate(d));
+      this.upcomingSlot = getUpcomingSlot(this.config, (d) => this.opsForDate(d));
 
       // Evict stale join-URL cache entries when the active slot changes so an
       // expired URL from a previous class does not get reused.
@@ -1333,10 +1462,18 @@ export class AdmiralEngine {
 
   /** Recovers a missed summary if the worker restarted at a slot boundary. */
   private recoverMissedSummary(): void {
-    const recent = getMostRecentEndedSlot(this.config);
+    const recent = getMostRecentEndedSlot(this.config, (d) => this.opsForDate(d));
     if (!recent) return;
     if (this.center.wasSummarySent(this.sessionKey(recent))) return;
     this.center.enqueue({ kind: "session_summary", slot: recent });
+  }
+
+  private opsForDate(dateKey: string): DayOverrideOps[] {
+    const fromSchedule = (this.config.overrides ?? [])
+      .filter((override) => override.date === dateKey)
+      .map(({ date: _date, ...ops }) => ops);
+    const fromDb = this.persistence.listDayOverrides(dateKey).map((row) => row.ops);
+    return [...fromSchedule, ...fromDb];
   }
 
   /** Drops join-URL cache entries that no longer match the active slot. */
@@ -1416,6 +1553,15 @@ export class AdmiralEngine {
     this.config = result.config;
     this.scheduleSource = result.source;
     this.scheduleLoadedAt = result.loadedAt.toISOString();
+
+    const todayKey = istDateKey(Date.now());
+    const issues = getDaySlots(this.config, todayKey, this.opsForDate(todayKey)).issues;
+    for (const issue of issues) {
+      this.persistence.appendEvent({
+        kind: "override_unmatched",
+        payload: { date: todayKey, op: issue.op, detail: issue.detail }
+      });
+    }
   }
 
   /** Snapshots durable control state to SQLite so it survives restarts. */

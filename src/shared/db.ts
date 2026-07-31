@@ -129,6 +129,21 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_participant_samples_ts ON participant_samples (ts_ms);
       CREATE INDEX idx_participant_samples_slot ON participant_samples (slot_key);
     `
+  },
+  {
+    version: 6,
+    statements: `
+      -- PWA/API-applied same-day schedule overrides. Survive restarts, garbage
+      -- collected once their IST date has passed.
+      CREATE TABLE day_overrides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        ops_json TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        source TEXT NOT NULL DEFAULT 'pwa'
+      );
+      CREATE INDEX idx_day_overrides_date ON day_overrides (date);
+    `
   }
 ];
 

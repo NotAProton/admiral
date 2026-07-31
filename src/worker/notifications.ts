@@ -33,6 +33,7 @@ export type NotificationKind =
   | "handoff"
   | "action_needed"
   | "session_summary"
+  | "day_override"
   | "standdown"
   | "session_standdown"
   | "morning_plan"
@@ -400,6 +401,8 @@ export class NotificationCenter {
         return renderActionNeeded(slot, row.payload, nowMs);
       case "session_summary":
         return renderSessionSummary(this.p, slot, nowMs);
+      case "day_override":
+        return renderDayOverride(row.payload, nowMs);
       case "standdown":
         return renderStanddown(Boolean(row.payload.active));
       case "session_standdown":
@@ -490,6 +493,8 @@ function specForKind(
       };
     case "session_summary":
       return { priority: 1, settleMs: 0, dedupeKey: slotKey ? `summary:${slotKey}` : null };
+    case "day_override":
+      return { priority: 2, settleMs: caps.ackSettleMs, dedupeKey: null, supersedeKind: "day_override" };
     case "standdown":
       return { priority: 2, settleMs: caps.ackSettleMs, dedupeKey: null, supersedeKind: "standdown" };
     case "session_standdown":
@@ -756,6 +761,42 @@ function renderSessionStanddown(slot: ActiveSlot | null, cancelled: boolean) {
   if (slot) lines.push(slotBrief(slot));
   lines.push("", 'To undo: tap "Cancel Session Stand-Down" in the dashboard.');
   return { subject: `⏭ Skipping this session — ${slot?.className ?? "session"}`, lines };
+}
+
+function renderDayOverride(payload: Record<string, unknown>, _nowMs: number) {
+  const date = typeof payload.date === "string" ? payload.date : "today";
+  const summary = Array.isArray(payload.summary) ? payload.summary.filter((s): s is string => typeof s === "string") : [];
+  const issues = Array.isArray(payload.issues)
+    ? payload.issues
+        .map((issue) => (issue && typeof issue === "object" ? String((issue as { detail?: unknown }).detail ?? "") : ""))
+        .filter((s) => s.length > 0)
+    : [];
+  const todaySlotsRaw = Array.isArray(payload.todaySlots) ? payload.todaySlots : [];
+  const todaySlots = todaySlotsRaw.map(parseSlot).filter((slot): slot is ActiveSlot => slot != null);
+
+  const lines: string[] = [];
+  if (summary.length > 0) {
+    lines.push(...summary);
+  } else {
+    lines.push("Schedule override updated.");
+  }
+
+  if (issues.length > 0) {
+    lines.push("", "Warnings:");
+    for (const detail of issues) lines.push(`  • ${detail}`);
+  }
+
+  if (todaySlots.length > 0) {
+    lines.push("", "Today's classes now:");
+    for (const slot of todaySlots) {
+      lines.push(`  ${slot.startedAt.slice(11, 16)}-${slot.endsAt.slice(11, 16)}  ${slot.className}`);
+    }
+  }
+
+  const domain = process.env.ADMIRAL_DOMAIN ?? "admiral";
+  lines.push("", `Undo or adjust: https://${domain}/`);
+
+  return { subject: `Schedule updated for ${date}`, lines };
 }
 
 function slotBrief(slot: ActiveSlot): string {

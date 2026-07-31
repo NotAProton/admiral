@@ -1,5 +1,12 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
-import type { ActiveSlot, HistoryEvent, ParticipantSample } from "../shared/types.js";
+import { istDateKey } from "../shared/istTime.js";
+import type {
+  ActiveSlot,
+  AppliedDayOverride,
+  DayOverrideOps,
+  HistoryEvent,
+  ParticipantSample
+} from "../shared/types.js";
 
 export type PersistedWorkerState = {
   standdown: boolean;
@@ -64,6 +71,14 @@ type ParticipantSampleRow = {
   class_name: string | null;
   participant_count: number;
   adopted: number;
+};
+
+type DayOverrideRow = {
+  id: number;
+  date: string;
+  ops_json: string;
+  created_ms: number;
+  source: string;
 };
 
 export type OutboxRow = {
@@ -133,6 +148,15 @@ function parsePayloadJson(raw: string | null): Record<string, unknown> | null {
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+function parseDayOverrideOps(raw: string): DayOverrideOps {
+  try {
+    const parsed = JSON.parse(raw) as DayOverrideOps;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
@@ -547,6 +571,61 @@ export class WorkerPersistence {
       participantCount: row.participant_count,
       adopted: row.adopted === 1
     }));
+  }
+
+  // ── Date-scoped schedule overrides (day_overrides) ───────────────────────
+
+  addDayOverride(input: {
+    date: string;
+    ops: DayOverrideOps;
+    source?: string;
+    createdMs?: number;
+  }): number {
+    const createdMs = input.createdMs ?? Date.now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO day_overrides (date, ops_json, created_ms, source)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(input.date, JSON.stringify(input.ops), createdMs, input.source ?? "pwa");
+
+    this.db.prepare("DELETE FROM day_overrides WHERE date < ?").run(istDateKey(createdMs));
+    return Number(info.lastInsertRowid);
+  }
+
+  listDayOverrides(date: string): AppliedDayOverride[] {
+    const rows = this.db
+      .prepare("SELECT id, date, ops_json, created_ms, source FROM day_overrides WHERE date = ? ORDER BY id ASC")
+      .all(date) as unknown as DayOverrideRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      date: row.date,
+      ops: parseDayOverrideOps(row.ops_json),
+      createdMs: row.created_ms,
+      createdIso: new Date(row.created_ms).toISOString(),
+      source: row.source
+    }));
+  }
+
+  getDayOverride(id: number): AppliedDayOverride | null {
+    const row = this.db
+      .prepare("SELECT id, date, ops_json, created_ms, source FROM day_overrides WHERE id = ?")
+      .get(id) as unknown as DayOverrideRow | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      date: row.date,
+      ops: parseDayOverrideOps(row.ops_json),
+      createdMs: row.created_ms,
+      createdIso: new Date(row.created_ms).toISOString(),
+      source: row.source
+    };
+  }
+
+  deleteDayOverride(id: number): boolean {
+    const info = this.db.prepare("DELETE FROM day_overrides WHERE id = ?").run(id);
+    return Number(info.changes) > 0;
   }
 
   // ── Retention ─────────────────────────────────────────────────────────────

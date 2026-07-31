@@ -15,6 +15,39 @@ export type CourseConfig = {
   weeklySlots: WeeklySlot[];
 };
 
+export type DayOverrideSwap = {
+  a: string;
+  b: string;
+};
+
+export type DayOverrideAdd = {
+  courseId: string;
+  start: string;
+  end: string;
+};
+
+/** Ops phrased like class announcements, applied to one IST date. */
+export type DayOverrideOps = {
+  cancel?: string[];
+  swap?: DayOverrideSwap[];
+  add?: DayOverrideAdd[];
+};
+
+/** As stored in schedule JSON (gist) — ops plus the date they apply to. */
+export type DayOverride = DayOverrideOps & {
+  date: string;
+};
+
+/** One row of the day_overrides table (API/PWA-applied overrides). */
+export type AppliedDayOverride = {
+  id: number;
+  date: string;
+  ops: DayOverrideOps;
+  createdMs: number;
+  createdIso: string;
+  source: string;
+};
+
 export type AdmiralConfig = {
   timezone: string;
   heartbeat: {
@@ -27,6 +60,7 @@ export type AdmiralConfig = {
     scrapeIntervalSeconds: number;
   };
   courses: CourseConfig[];
+  overrides?: DayOverride[];
 };
 
 export type AdmiralState = "Out" | "Joining" | "InRoom" | "Leaving";
@@ -135,6 +169,8 @@ export type StatusResponse = {
   upcomingSlot: ActiveSlot | null;
   currentIstTime: string;
   schedule: AdmiralConfig;
+  todaySlots: ActiveSlot[];
+  todayOverrides: AppliedDayOverride[];
   scheduleSource: ScheduleSource;
   scheduleLoadedAt: string;
   scheduleUrl: string | null;

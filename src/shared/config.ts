@@ -4,6 +4,12 @@ import type { AdmiralConfig, ScheduleSource } from "./types.js";
 
 const daySchema = z.enum(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
 const hhmmSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+const dayOverrideSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  cancel: z.array(z.string().min(1)).optional(),
+  swap: z.array(z.object({ a: hhmmSchema, b: hhmmSchema })).optional(),
+  add: z.array(z.object({ courseId: z.string().min(1), start: hhmmSchema, end: hhmmSchema })).optional()
+});
 
 const configSchema = z.object({
   timezone: z.string().min(1),
@@ -31,7 +37,8 @@ const configSchema = z.object({
         })
       ).min(1)
     })
-  ).min(1)
+  ).min(1),
+  overrides: z.array(dayOverrideSchema).optional()
 });
 
 export type ConfigLoadResult =

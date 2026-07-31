@@ -45,6 +45,8 @@ function stubStatus(): StatusResponse {
         }
       ]
     },
+    todaySlots: [],
+    todayOverrides: [],
     participantCount: 0,
     participantNames: [],
     currentRoom: null,
@@ -153,6 +155,16 @@ test("P2 standdown on->off supersedes: only OFF is sent", async () => {
   await center.flushDue();
   assert.equal(sends.length, 1);
   assert.match(sends[0]!.subject, /Standdown OFF/);
+});
+
+test("day_override acks supersede: latest update wins", async () => {
+  const { center, sends } = makeCenter();
+  center.enqueue({ kind: "day_override", payload: { date: "2026-08-01", summary: ["Swapped 10:00 ↔ 11:00"] } });
+  center.enqueue({ kind: "day_override", payload: { date: "2026-08-01", summary: ["Cancelled CBE411"] } });
+  await center.flushDue();
+  assert.equal(sends.length, 1);
+  assert.match(sends[0]!.subject, /Schedule updated/);
+  assert.match(sends[0]!.text, /Cancelled CBE411/);
 });
 
 test("failed send retries with backoff and eventually gives up", async () => {

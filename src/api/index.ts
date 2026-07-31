@@ -45,7 +45,7 @@ function clearLoginFailures(ip: string): void {
 }
 
 // Defense-in-depth: check Origin/Referer matches our domain on state-changing routes.
-const mutatingPaths = new Set(["/login", "/override", "/heartbeat", "/logout"]);
+const mutatingPaths = new Set(["/login", "/override", "/heartbeat", "/logout", "/day-override", "/day-override-delete"]);
 const allowedHost = process.env.ADMIRAL_DOMAIN ?? "";
 
 function originAllowed(request: { headers: Record<string, string | string[] | undefined>; ip: string }): boolean {
@@ -65,6 +65,16 @@ function originAllowed(request: { headers: Record<string, string | string[] | un
 const loginSchema = z.object({ token: z.string().min(1) });
 const heartbeatSchema = z.object({ device_id: z.string().min(1) });
 const overrideSchema = z.object({ action: z.enum(["force_join", "force_leave", "standdown_on", "standdown_off", "standdown_session", "standdown_session_cancel"]) });
+const dayOverrideSchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  op: z.enum(["cancel", "swap", "add"]),
+  courseId: z.string().min(1).optional(),
+  a: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  b: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+  end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
+});
+const dayOverrideDeleteSchema = z.object({ id: z.number().int().positive() });
 
 const publicFiles: Record<string, string> = {
   "/": resolve("web/index.html"),
@@ -170,6 +180,28 @@ app.get("/participant-samples", async (request) => {
   return res.json();
 });
 
+app.get("/day-overrides", async (request, reply) => {
+  try {
+    const query = new URL(request.url, "http://localhost").searchParams;
+    const date = query.get("date");
+    if (date != null) {
+      dayOverrideSchema.pick({ date: true }).parse({ date });
+    }
+    const querySuffix = date ? `?date=${encodeURIComponent(date)}` : "";
+    const res = await fetch(`http://127.0.0.1:${internalPort}/internal/day-overrides${querySuffix}`, {
+      signal: AbortSignal.timeout(5_000)
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: "Internal day-overrides proxy failed" }));
+      return reply.code(502).send(body);
+    }
+    return res.json();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(400).send({ error: message });
+  }
+});
+
 app.post("/heartbeat", async (request, reply) => {
   const body = heartbeatSchema.parse(request.body);
   const res = await fetch(`http://127.0.0.1:${internalPort}/internal/heartbeat`, {
@@ -200,6 +232,40 @@ app.post("/override", async (request, reply) => {
   }
 
   return { ok: true };
+});
+
+app.post("/day-override", async (request, reply) => {
+  const body = dayOverrideSchema.parse(request.body);
+  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/day-override`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000)
+  });
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return reply.code(res.status === 400 ? 400 : 502).send(payload.error ? payload : { error: "Internal day-override proxy failed" });
+  }
+
+  return payload;
+});
+
+app.post("/day-override-delete", async (request, reply) => {
+  const body = dayOverrideDeleteSchema.parse(request.body);
+  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/day-override-delete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000)
+  });
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return reply.code(res.status === 404 ? 404 : 502).send(payload.error ? payload : { error: "Internal day-override-delete proxy failed" });
+  }
+
+  return payload;
 });
 
 app.get("/events", async (request, reply) => {
