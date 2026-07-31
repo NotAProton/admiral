@@ -79,6 +79,8 @@ const dayOverrideDeleteSchema = z.object({ id: z.number().int().positive() });
 const publicFiles: Record<string, string> = {
   "/": resolve("web/index.html"),
   "/app.js": resolve("web/app.js"),
+  "/today": resolve("web/today.html"),
+  "/today.js": resolve("web/today.js"),
   "/participant-stats": resolve("web/participant-stats.html"),
   "/participant-stats.js": resolve("web/participant-stats.js"),
   "/manifest.json": resolve("web/manifest.json"),

@@ -17,17 +17,9 @@ const sessionStanddownPill = document.getElementById("sessionStanddownPill");
 const cancelSessionStanddownBtn = document.getElementById("cancelSessionStanddownBtn");
 const historyList = document.getElementById("historyList");
 const historyMoreBtn = document.getElementById("historyMoreBtn");
-const todayList = document.getElementById("todayList");
-const todaySwapHint = document.getElementById("todaySwapHint");
-const todayOverrideList = document.getElementById("todayOverrideList");
-const todayAddCourse = document.getElementById("todayAddCourse");
-const todayAddStart = document.getElementById("todayAddStart");
-const todayAddEnd = document.getElementById("todayAddEnd");
-const todayAddBtn = document.getElementById("todayAddBtn");
 
 let historyTimer = null;
 let historyOldestId = null;
-let swapArmedStart = null;
 
 // ── Utility ────────────────────────────────────────────────────────────────
 
@@ -279,169 +271,7 @@ function renderStatus(status) {
     watchPill.style.display = text ? "" : "none";
   }
 
-  renderTodayPanel(status);
-
   renderCountdown();
-}
-
-function courseNameById(status, courseId) {
-  const course = status.schedule.courses.find((c) => c.courseId === courseId);
-  return course ? `${course.courseId} ${course.className}` : courseId;
-}
-
-function formatOverrideLine(status, row) {
-  const ops = row.ops || {};
-  if (Array.isArray(ops.cancel) && ops.cancel.length > 0) {
-    return `Cancelled: ${ops.cancel.map((id) => courseNameById(status, id)).join(", ")}`;
-  }
-  if (Array.isArray(ops.swap) && ops.swap.length > 0) {
-    const s = ops.swap[0];
-    return `Swapped: ${s.a} ↔ ${s.b}`;
-  }
-  if (Array.isArray(ops.add) && ops.add.length > 0) {
-    const a = ops.add[0];
-    return `Added: ${courseNameById(status, a.courseId)} ${a.start}-${a.end}`;
-  }
-  return "Updated schedule";
-}
-
-async function applyDayOverride(payload, btn) {
-  if (btn) setButtonBusy(btn, true);
-  try {
-    const result = await request("/day-override", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-    if (Array.isArray(result.issues) && result.issues.length > 0) {
-      showError(result.issues.map((issue) => issue.detail).join("; "));
-    }
-    await refreshStatus();
-  } catch (err) {
-    showError(`Action failed: ${err.message}`);
-  } finally {
-    if (btn) setButtonBusy(btn, false);
-  }
-}
-
-async function deleteDayOverride(id, btn) {
-  if (btn) setButtonBusy(btn, true);
-  try {
-    await request("/day-override-delete", {
-      method: "POST",
-      body: JSON.stringify({ id })
-    });
-    await refreshStatus();
-  } catch (err) {
-    showError(`Undo failed: ${err.message}`);
-  } finally {
-    if (btn) setButtonBusy(btn, false);
-  }
-}
-
-function renderTodayPanel(status) {
-  const courses = status.schedule.courses ?? [];
-  const slots = status.todaySlots ?? [];
-  const overrides = status.todayOverrides ?? [];
-
-  if (swapArmedStart && !slots.some((slot) => slot.startedAt.slice(11, 16) === swapArmedStart)) {
-    swapArmedStart = null;
-  }
-
-  const selectedCourse = todayAddCourse.value;
-  todayAddCourse.innerHTML = "";
-  for (const course of courses) {
-    const opt = document.createElement("option");
-    opt.value = course.courseId;
-    opt.textContent = `${course.courseId} ${course.className}`;
-    todayAddCourse.appendChild(opt);
-  }
-  if (selectedCourse && courses.some((course) => course.courseId === selectedCourse)) {
-    todayAddCourse.value = selectedCourse;
-  }
-
-  todayList.innerHTML = "";
-  if (slots.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "today-row";
-    empty.textContent = "No classes scheduled for today.";
-    todayList.appendChild(empty);
-  }
-
-  for (const slot of slots) {
-    const row = document.createElement("div");
-    row.className = "today-row";
-    const start = slot.startedAt.slice(11, 16);
-    const end = slot.endsAt.slice(11, 16);
-    if (swapArmedStart === start) row.classList.add("swap-armed");
-
-    const text = document.createElement("div");
-    text.className = "today-slot";
-    text.textContent = `${start}-${end}  ${slot.className}`;
-
-    const actions = document.createElement("div");
-    actions.className = "today-actions";
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "secondary";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", async () => {
-      if (!confirm(`Cancel ${slot.className} today? Admiral will skip it.`)) return;
-      await applyDayOverride({ op: "cancel", courseId: slot.courseId }, cancelBtn);
-    });
-
-    const swapBtn = document.createElement("button");
-    swapBtn.className = "secondary";
-    swapBtn.textContent = "Swap";
-    swapBtn.addEventListener("click", async () => {
-      if (!swapArmedStart) {
-        swapArmedStart = start;
-        renderTodayPanel(status);
-        return;
-      }
-      if (swapArmedStart === start) {
-        swapArmedStart = null;
-        renderTodayPanel(status);
-        return;
-      }
-      const first = swapArmedStart;
-      swapArmedStart = null;
-      await applyDayOverride({ op: "swap", a: first, b: start }, swapBtn);
-    });
-
-    actions.append(cancelBtn, swapBtn);
-    row.append(text, actions);
-    todayList.appendChild(row);
-  }
-
-  todaySwapHint.classList.toggle("hidden", !swapArmedStart);
-
-  todayOverrideList.innerHTML = "";
-  if (overrides.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "override-row";
-    empty.textContent = "No applied overrides.";
-    todayOverrideList.appendChild(empty);
-  }
-
-  for (const rowData of overrides) {
-    const row = document.createElement("div");
-    row.className = "override-row";
-
-    const text = document.createElement("div");
-    text.className = "today-slot";
-    text.textContent = formatOverrideLine(status, rowData);
-
-    const undoBtn = document.createElement("button");
-    undoBtn.className = "secondary";
-    undoBtn.textContent = "Undo";
-    undoBtn.addEventListener("click", async () => {
-      if (!confirm("Undo this override?")) return;
-      await deleteDayOverride(rowData.id, undoBtn);
-    });
-
-    row.append(text, undoBtn);
-    todayOverrideList.appendChild(row);
-  }
 }
 
 // ── Status fetch ───────────────────────────────────────────────────────────
@@ -697,17 +527,6 @@ document.getElementById("openJoinBtn").addEventListener("click", () => {
   if (lastStatus?.bbbJoinUrl) {
     window.open(lastStatus.bbbJoinUrl, "_blank", "noopener,noreferrer");
   }
-});
-
-todayAddBtn.addEventListener("click", async (event) => {
-  const courseId = todayAddCourse.value;
-  const start = todayAddStart.value;
-  const end = todayAddEnd.value;
-  if (!courseId || !start || !end) {
-    showError("Pick course, start time, and end time.");
-    return;
-  }
-  await applyDayOverride({ op: "add", courseId, start, end }, event.currentTarget);
 });
 
 document.getElementById("logoutBtn").addEventListener("click", async () => {
