@@ -7,8 +7,18 @@
     <title>Admiral — Participant stats</title>
     <link rel="manifest" href="/manifest.json" />
     <style>
-      /* Same palette and language as the status page: white, black, accent #1c1c84. */
-      :root { --bg: #ffffff; --ink: #000000; --accent: #1c1c84; }
+      :root {
+        --bg: #ffffff;
+        --ink: #000000;
+        --accent: #1c1c84;
+        --st-out:     #6b6b6b;
+        --st-joining: #b45309;
+        --st-inroom:  #1d4ed8;
+        --st-leaving: #15803d;
+        --warn:       #b45309;
+        --danger:     #b91c1c;
+        --muted:      #6b6b6b;
+      }
       * { box-sizing: border-box; border-radius: 0 !important; }
       body {
         margin: 0;
@@ -57,7 +67,7 @@
       input, select { font: inherit; padding: 8px 10px; color: var(--ink); background: var(--bg); border: 2px solid var(--ink); }
       label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; display: inline-flex; gap: 8px; align-items: center; }
       .error-banner { display: none; background: var(--ink); color: #ffffff; border-left: 6px solid var(--accent); padding: 10px 14px; font-size: 12px; }
-      #chart { width: 100%; height: auto; display: block; }
+      #chart { width: 100%; min-height: 260px; position: relative; }
       .cards { display: grid; gap: 10px; }
       .card { border: 1px solid var(--ink); padding: 10px 12px; font-size: 12px; }
       .card .card-title { font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
@@ -109,13 +119,7 @@
 
         <div class="panel">
           <div class="panel-title">Headcount timeline</div>
-          <svg id="chart" viewBox="0 0 960 260" role="img" aria-label="Participant count over time"></svg>
-          <div class="row" style="margin-top: 8px">
-            <span class="pill">— headcount</span>
-            <span class="pill">- - dashed = empty threshold</span>
-            <span class="pill">accent dot = below threshold</span>
-            <span class="pill">ring = adopted via sweep</span>
-          </div>
+          <div id="chart" role="img" aria-label="Participant count over time"></div>
         </div>
 
         <div class="panel">

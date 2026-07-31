@@ -150,10 +150,17 @@ function renderCountdown() {
 // ── Status rendering ───────────────────────────────────────────────────────
 
 const STATE_COLORS = {
-  Out: "var(--muted)",
-  Joining: "var(--warn)",
-  InRoom: "var(--ok)",
-  Leaving: "var(--danger)"
+  Out: "var(--st-out)",
+  Joining: "var(--st-joining)",
+  InRoom: "var(--st-inroom)",
+  Leaving: "var(--st-leaving)"
+};
+
+const STATE_LABELS = {
+  Out: "OUT",
+  Joining: "JOINING",
+  InRoom: "IN ROOM",
+  Leaving: "LEAVING"
 };
 
 function renderStatus(status) {
@@ -166,11 +173,25 @@ function renderStatus(status) {
   hbState.textContent = age == null ? "Heartbeat: none yet" : `Heartbeat: ${age}s ago`;
   hbState.className = `pill ${fresh ? "ok" : "warn"}`;
 
-  // State summary card
+  // State summary card — stripe + colored value word + dot inherits color
+  const state = status.control?.state ?? "Out";
+  const stateBox = document.getElementById("stateBox");
   const statStateEl = document.getElementById("statState");
-  if (statStateEl) {
-    statStateEl.textContent = status.control?.state ?? "--";
-    statStateEl.style.color = STATE_COLORS[status.control?.state] ?? "";
+  if (stateBox && statStateEl) {
+    // Swap the state-stripe modifier class on the card.
+    for (const s of ["Out", "Joining", "InRoom", "Leaving"]) {
+      stateBox.classList.toggle(`stat-box--${s}`, s === state);
+    }
+    statStateEl.textContent = STATE_LABELS[state] ?? state.toUpperCase();
+  }
+  // Topbar state pill — glanceable even when scrolled
+  const topbarState = document.getElementById("topbarState");
+  const topbarStateText = document.getElementById("topbarStateText");
+  if (topbarState && topbarStateText) {
+    for (const s of ["Out", "Joining", "InRoom", "Leaving"]) {
+      topbarState.classList.toggle(`topbar-state--${s}`, s === state);
+    }
+    topbarStateText.textContent = STATE_LABELS[state] ?? state.toUpperCase();
   }
   const statReasonEl = document.getElementById("statReason");
   if (statReasonEl && !status.suppressions?.joinBackoffActive) statReasonEl.textContent = status.control?.reason ?? "";
@@ -188,9 +209,16 @@ function renderStatus(status) {
   const statDuplicateEl = document.getElementById("statDuplicate");
   if (statParticipantsEl) statParticipantsEl.textContent = status.presence?.participantCount ?? 0;
   if (statDuplicateEl) {
-    statDuplicateEl.textContent = status.presence?.duplicateConfirmed
-      ? "\u26a0 Duplicate detected"
-      : (status.presence?.participantCount ?? 0) > 0 ? `${status.presence?.duplicateStreak ?? 0} streak` : "";
+    const isDuplicate = status.presence?.duplicateConfirmed;
+    if (isDuplicate) {
+      statDuplicateEl.textContent = "⚠ Duplicate detected";
+      statDuplicateEl.classList.add("danger");
+    } else {
+      statDuplicateEl.textContent = (status.presence?.participantCount ?? 0) > 0
+        ? `${status.presence?.duplicateStreak ?? 0} streak`
+        : "";
+      statDuplicateEl.classList.remove("danger");
+    }
   }
 
   // Upcoming class pill
@@ -198,7 +226,7 @@ function renderStatus(status) {
     upcomingClass.textContent = `Upcoming: ${status.schedule.upcomingSlot.className}`;
     upcomingClass.classList.add("pill");
   } else {
-    upcomingClass.textContent = "Upcoming: none";
+    upcomingClass.textContent = "No more classes today";
   }
 
   // Session stand-down pill + cancel button
@@ -215,14 +243,29 @@ function renderStatus(status) {
   document.getElementById("standdownOnBtn").disabled = status.suppressions?.globalStanddown ?? false;
   document.getElementById("standdownOffBtn").disabled = !(status.suppressions?.globalStanddown ?? false);
 
-  // Email budget pill
+  // Presence-control button enablement.
+  // Risk-aware: Force Join is gated (risky action), Join Myself needs a URL,
+  // Force Leave needs something to leave.
+  const joinBtn = document.getElementById("joinBtn");
+  const leaveBtn = document.getElementById("leaveBtn");
+  const openJoinBtn = document.getElementById("openJoinBtn");
+  const hasActiveSlot = status.schedule?.activeSlot != null;
+  const inRoomOrJoining = state === "InRoom" || state === "Joining";
+  if (joinBtn) joinBtn.disabled = !hasActiveSlot || inRoomOrJoining;
+  if (leaveBtn) leaveBtn.disabled = !inRoomOrJoining;
+  if (openJoinBtn) openJoinBtn.disabled = !status.presence?.bbbJoinUrl;
+
+  // ── System strip (demoted telemetry) ─────────────────────────────────────
   const emailPill = document.getElementById("emailBudgetPill");
-  if (emailPill && status.email) {
-    emailPill.textContent = `Emails today: ${status.email.emailsToday}/${status.email.emailDailyCap}` +
-      (status.email.suppressedToday > 0 ? ` \u00b7 ${status.email.suppressedToday} muted` : "");
+  if (emailPill) {
+    if (status.email) {
+      emailPill.textContent = `emails: ${status.email.emailsToday}/${status.email.emailDailyCap}` +
+        (status.email.suppressedToday > 0 ? ` (${status.email.suppressedToday} muted)` : "");
+    } else {
+      emailPill.textContent = "emails: —";
+    }
   }
 
-  // Schedule source pill
   const scheduleSourceEl = document.getElementById("scheduleSourcePill");
   if (scheduleSourceEl) {
     const when = status.schedule?.loadedAt
@@ -233,8 +276,19 @@ function renderStatus(status) {
           hour12: false
         }).format(new Date(status.schedule.loadedAt))
       : "--";
-    scheduleSourceEl.textContent = `Schedule: ${status.schedule?.source ?? "?"} @ ${when}` +
-      (status.schedule?.url ? ` \u00b7 ${status.schedule.url}` : "");
+    scheduleSourceEl.textContent = `schedule: ${status.schedule?.source ?? "?"} @ ${when}`;
+  }
+
+  const workerHealthEl = document.getElementById("workerHealthPill");
+  if (workerHealthEl) {
+    const age = status.heartbeat?.lastAgeSeconds;
+    const hbStale = age == null || age > 120;
+    const backoffActive = status.suppressions?.joinBackoffActive ?? false;
+    let health = "ok";
+    if (hbStale) health = "heartbeat stale";
+    else if (backoffActive) health = "backoff";
+    workerHealthEl.textContent = `worker: ${health}`;
+    workerHealthEl.style.color = health === "ok" ? "" : "var(--warn)";
   }
 
   // Current room pill
@@ -295,8 +349,12 @@ function connectEvents() {
       const status = JSON.parse(event.data);
       unlockUi();
       renderStatus(status);
-      // reset reconnect delay on successful message
+      // Reset reconnect delay on successful message
       sseReconnectDelay = 3000;
+      // Refresh history to update the ticker. Debounced: the 10s poll
+      // already covers the steady-state case; this handles the "user just
+      // acted and wants to see it now" cue without adding a second API call.
+      scheduleHistoryRefresh();
     } catch {
       // ignore malformed event payload
     }
@@ -308,6 +366,15 @@ function connectEvents() {
     setTimeout(connectEvents, sseReconnectDelay);
     sseReconnectDelay = Math.min(sseReconnectDelay * 2, 30000);
   };
+}
+
+let historyRefreshTimer = null;
+function scheduleHistoryRefresh() {
+  if (historyRefreshTimer) clearTimeout(historyRefreshTimer);
+  historyRefreshTimer = setTimeout(() => {
+    historyRefreshTimer = null;
+    if (document.visibilityState === "visible") void loadHistory();
+  }, 800);
 }
 
 // ── Heartbeat ──────────────────────────────────────────────────────────────
@@ -404,6 +471,7 @@ function historyDetailText(event) {
 }
 
 function renderHistoryEvents(events, append) {
+  const isNewHead = !append && events.length > 0 && events[0].id !== lastTickerEventId;
   if (!append) historyList.innerHTML = "";
   if (events.length === 0 && !append) {
     historyList.innerHTML = '<div class="history-empty">No events yet.</div>';
@@ -423,6 +491,39 @@ function renderHistoryEvents(events, append) {
     detail.textContent = historyDetailText(event);
     row.append(time, kind, detail);
     historyList.appendChild(row);
+  }
+  // Ticker = rolling tail of the same event stream.
+  if (events.length > 0) renderTicker(events[0], isNewHead);
+}
+
+let lastTickerEventId = null;
+const tickerEl = document.getElementById("ticker");
+
+function tickerTime(tsMs) {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(new Date(tsMs));
+}
+
+function renderTicker(event, flash) {
+  if (!tickerEl || !event) return;
+  const timeEl = tickerEl.querySelector(".ticker-time");
+  const kindEl = tickerEl.querySelector(".ticker-kind");
+  const detailEl = tickerEl.querySelector(".ticker-detail");
+  if (timeEl) timeEl.textContent = tickerTime(event.tsMs);
+  if (kindEl) {
+    kindEl.textContent = HISTORY_KIND_LABELS[event.kind] ?? event.kind;
+    kindEl.classList.remove("ticker-empty");
+  }
+  if (detailEl) detailEl.textContent = historyDetailText(event);
+  lastTickerEventId = event.id;
+  if (flash) {
+    tickerEl.classList.add("flash");
+    setTimeout(() => tickerEl.classList.remove("flash"), 400);
   }
 }
 
@@ -451,7 +552,7 @@ function startHistoryLoop() {
     if (document.visibilityState === "visible" && !appCard.classList.contains("hidden")) {
       void loadHistory();
     }
-  }, 60000);
+  }, 10000);
 }
 
 historyMoreBtn.addEventListener("click", () => void loadHistory(true));

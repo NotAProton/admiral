@@ -8,16 +8,22 @@
     <link rel="manifest" href="/manifest.json" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
     <style>
-      /* ── Palette: white, black, accent #1c1c84. Nothing else. ── */
+      /* ── Palette: white, black, structural accent #1c1c84. ── */
       :root {
         --bg: #ffffff;
         --ink: #000000;
         --accent: #1c1c84;
-        /* legacy tokens consumed by app.js inline state colors */
-        --muted: #000000;
-        --ok: #1c1c84;
-        --warn: #1c1c84;
-        --danger: #000000;
+
+        /* ── Semantic signal colors. Color is signal, never decoration. ──
+           Used ONLY for state indicators, warnings, and error paths.
+           All pass WCAG AA (≥4.5:1) on white. */
+        --st-out:     #6b6b6b; /* idle, neutral gray */
+        --st-joining: #b45309; /* amber — transition in progress */
+        --st-inroom:  #1d4ed8; /* blue — active coverage */
+        --st-leaving: #15803d; /* green — controlled retreat/handoff */
+        --warn:       #b45309; /* amber — caution (room watch, backoff) */
+        --danger:     #b91c1c; /* red — true problems (duplicate, scrape fail) */
+        --muted:      #6b6b6b; /* idle/inactive */
       }
 
       * {
@@ -117,6 +123,23 @@
       button.secondary:hover:not(:disabled) { background: var(--ink); color: #ffffff; }
       button.danger { background: var(--ink); color: #ffffff; border-color: var(--ink); }
       button.danger:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+      /* Caution = amber outline. Used for the risky action: Force Join
+         (can create duplicate presence). Outline signals "proceed with care",
+         matching its real risk profile. */
+      button.caution {
+        background: var(--bg);
+        color: var(--warn);
+        border-color: var(--warn);
+      }
+      button.caution:hover:not(:disabled) {
+        background: var(--warn);
+        color: #ffffff;
+        border-color: var(--warn);
+      }
+      button.caution:focus-visible {
+        outline: 2px solid var(--warn);
+        outline-offset: 2px;
+      }
       button:disabled { opacity: 0.35; cursor: not-allowed; }
       button.busy { opacity: 0.6; cursor: wait; }
       button:focus-visible,
@@ -192,13 +215,111 @@
         word-break: break-word;
       }
       .stat-box .sub { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+      .stat-box .sub.danger { color: var(--danger); opacity: 1; font-weight: 700; }
+
+      /* ── State stripe ────────────────────────────────────────────────────
+         The State card gets a 4px colored left border + colored word + dot,
+         answering the one question the dashboard exists for: "what's happening
+         right now?" */
+      .stat-box--state {
+        border-left-width: 4px;
+        position: relative;
+      }
+      .state-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        margin-right: 6px;
+        vertical-align: middle;
+        background: currentColor;
+      }
+      .stat-box--Out     { border-left-color: var(--st-out);     color: var(--st-out); }
+      .stat-box--Joining { border-left-color: var(--st-joining); color: var(--st-joining); }
+      .stat-box--InRoom  { border-left-color: var(--st-inroom);  color: var(--st-inroom); }
+      .stat-box--Leaving { border-left-color: var(--st-leaving); color: var(--st-leaving); }
+      .stat-box--state .value { color: inherit; }
+      .stat-box--state .label { color: var(--ink); }
+      .stat-box--state .sub { color: var(--ink); }
+
+      /* ── Topbar state pill ────────────────────────────────────────────────
+         Compact STATE: label that is glanceable even when scrolled.
+         Color matches the state stripe. */
+      .topbar-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        background: #ffffff;
+        color: var(--ink);
+        border: 1px solid #ffffff;
+      }
+      .topbar-state .state-dot { background: currentColor; }
+      .topbar-state--Out     { color: var(--st-out); }
+      .topbar-state--Joining { color: var(--st-joining); }
+      .topbar-state--InRoom  { color: var(--st-inroom); }
+      .topbar-state--Leaving { color: var(--st-leaving); }
+
+      /* ── System strip ─────────────────────────────────────────────────────
+         Telemetry that is not presence-critical: email budget, schedule source,
+         system health. Demoted visually — small text, no borders, single line.
+         Lives between control panels and history so it doesn't crowd the
+         primary pill row. */
+      .system-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 18px;
+        font-size: 11px;
+        letter-spacing: 0.5px;
+        color: var(--muted);
+        padding: 4px 0;
+        font-variant-numeric: tabular-nums;
+      }
+      .system-strip b { color: var(--ink); font-weight: 600; }
+
+      /* ── Live-log ticker ──────────────────────────────────────────────────
+         Rolling one-line console tail under the status grid. The tail of the
+         history stream — gives a "system alive" cue without a second panel. */
+      .ticker {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        background: var(--bg);
+        border: 1px solid var(--ink);
+        border-left: 4px solid var(--accent);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .ticker-time { color: var(--muted); flex: 0 0 auto; }
+      .ticker-kind { color: var(--ink); font-weight: 700; flex: 0 0 auto; }
+      .ticker-detail { color: var(--ink); opacity: 0.85; flex: 1 1 auto;
+        overflow: hidden; text-overflow: ellipsis; }
+      .ticker-empty { opacity: 0.5; }
+      .ticker::after {
+        content: "\25ae";
+        color: var(--accent);
+        flex: 0 0 auto;
+        animation: ticker-blink 1s steps(2, end) infinite;
+      }
+      @keyframes ticker-blink { 50% { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) {
+        .ticker::after { animation: none; opacity: 1; }
+      }
+      .ticker.flash { background: #fffbe6; transition: background 0.4s ease-out; }
 
       /* ── Error banner ── */
       .error-banner {
         display: none;
         background: var(--ink);
         color: #ffffff;
-        border-left: 6px solid var(--accent);
+        border-left: 6px solid var(--danger);
         padding: 10px 14px;
         font-size: 12px;
         letter-spacing: 0.5px;
@@ -273,6 +394,7 @@
       <div class="row">
         <a class="pill" href="/today">Today</a>
         <a class="pill" href="/participant-stats">Participant stats</a>
+        <span id="topbarState" class="topbar-state"><span class="state-dot"></span><span id="topbarStateText">--</span></span>
         <div id="hbState" class="pill">Heartbeat: unknown</div>
       </div>
     </header>
@@ -291,8 +413,8 @@
         <div id="errorBanner" class="error-banner" role="alert"></div>
 
         <div class="status-summary">
-          <div class="stat-box">
-            <div class="label">State</div>
+          <div class="stat-box stat-box--state" id="stateBox">
+            <div class="label"><span class="state-dot"></span>State</div>
             <div class="value" id="statState">--</div>
             <div class="sub" id="statReason"></div>
           </div>
@@ -313,11 +435,15 @@
           </div>
         </div>
 
+        <div id="ticker" class="ticker">
+          <span class="ticker-time">--:--:--</span>
+          <span class="ticker-kind ticker-empty">awaiting events</span>
+          <span class="ticker-detail"></span>
+        </div>
+
         <div class="row">
           <div id="siteTime" class="pill">IST time: --</div>
           <div id="upcomingClass" class="pill">Upcoming: --</div>
-          <div id="emailBudgetPill" class="pill">Emails: --</div>
-          <div id="scheduleSourcePill" class="pill">Schedule: --</div>
           <div id="currentRoomPill" class="pill" style="display:none"></div>
           <div id="roomWatchPill" class="pill warn" style="display:none"></div>
           <div id="sessionStanddownPill" class="session-standdown-pill"></div>
@@ -326,9 +452,9 @@
         <div class="panel">
           <div class="panel-title">Presence control</div>
           <div class="row">
-            <button id="joinBtn">Force Join</button>
-            <button id="leaveBtn" class="danger">Force Leave</button>
-            <button id="openJoinBtn" class="secondary">Join Myself</button>
+            <button id="openJoinBtn">Join Myself</button>
+            <button id="leaveBtn" class="secondary">Force Leave</button>
+            <button id="joinBtn" class="caution">Force Join</button>
           </div>
         </div>
 
@@ -340,6 +466,13 @@
             <button id="standdownSessionBtn" class="secondary">Stand Down This Session</button>
             <button id="cancelSessionStanddownBtn" class="secondary hidden">Cancel Session Stand-Down</button>
           </div>
+        </div>
+
+        <div class="system-strip" id="systemStrip">
+          <span>system ·</span>
+          <span id="scheduleSourcePill">schedule: --</span>
+          <span id="emailBudgetPill">emails: --</span>
+          <span id="workerHealthPill">worker: --</span>
         </div>
 
         <details class="panel">
