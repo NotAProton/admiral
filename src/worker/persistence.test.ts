@@ -270,43 +270,32 @@ test("state survives close and reopen of a file-backed database", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 
-test("migration v6→v7 upgrades worker_state to control_state and suppressions", () => {
+test("migration v7 creates new tables and bumps schema version", () => {
   const dir = mkdtempSync(join(tmpdir(), "admiral-db-mig-"));
   try {
     const dbPath = join(dir, "admiral.db");
-
-    // Create a v6 database by manually building the schema and inserting a
-    // realistic worker_state row.
     const db = openDatabase(dbPath);
 
-    // Verify v7 tables exist.
-    const csRows = db.prepare("SELECT key, value_json FROM control_state").all();
-    assert.ok(csRows.length >= 1, "control_state should have at least 'standdown'");
-    const hasStanddown = (csRows as []).some(
-      (r: unknown) => (r as { key: string }).key === "standdown"
-    );
-    assert.ok(hasStanddown);
+    // v7 tables exist and are empty (no data migration).
+    const csCols = db.prepare("PRAGMA table_info(control_state)").all() as unknown as { name: string }[];
+    assert.ok(csCols.map((c) => c.name).includes("key"));
+    assert.ok(csCols.map((c) => c.name).includes("value_json"));
 
-    const supCols = db
-      .prepare("PRAGMA table_info(suppressions)")
-      .all() as unknown as { name: string }[];
-    const supColNames = supCols.map((c) => c.name);
-    assert.ok(supColNames.includes("kind"));
-    assert.ok(supColNames.includes("active"));
+    const supCols = db.prepare("PRAGMA table_info(suppressions)").all() as unknown as { name: string }[];
+    assert.ok(supCols.map((c) => c.name).includes("kind"));
+    assert.ok(supCols.map((c) => c.name).includes("active"));
 
-    const sessionCols = db
-      .prepare("PRAGMA table_info(sessions)")
-      .all() as unknown as { name: string }[];
-    const sessionColNames = sessionCols.map((c) => c.name);
-    assert.ok(sessionColNames.includes("via"));
-    assert.ok(sessionColNames.includes("origin_slot_key"));
+    const sessionCols = db.prepare("PRAGMA table_info(sessions)").all() as unknown as { name: string }[];
+    assert.ok(sessionCols.map((c) => c.name).includes("via"));
+    assert.ok(sessionCols.map((c) => c.name).includes("origin_slot_key"));
 
-    // participant_samples gained session_id column.
-    const sampleCols = db
-      .prepare("PRAGMA table_info(participant_samples)")
-      .all() as unknown as { name: string }[];
-    const sampleColNames = sampleCols.map((c) => c.name);
-    assert.ok(sampleColNames.includes("session_id"));
+    // participant_samples gained session_id.
+    const sampleCols = db.prepare("PRAGMA table_info(participant_samples)").all() as unknown as { name: string }[];
+    assert.ok(sampleCols.map((c) => c.name).includes("session_id"));
+
+    // worker_state still exists (engine reads it).
+    const wsCols = db.prepare("PRAGMA table_info(worker_state)").all() as unknown as { name: string }[];
+    assert.ok(wsCols.map((c) => c.name).includes("standdown"));
 
     // Schema version is 7.
     const row = db.prepare("PRAGMA user_version").get() as unknown as { user_version: number };

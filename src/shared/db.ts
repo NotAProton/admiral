@@ -148,45 +148,17 @@ const MIGRATIONS: readonly Migration[] = [
   {
     version: 7,
     statements: `
-      -- ── v7: Unified control state, suppressions, sessions ────────────
+      -- v7: New tables for the refactored architecture.
+      -- worker_state is retained (the engine still reads/writes it via
+      -- WorkerPersistence). The new tables start empty; the engine will
+      -- populate them as it runs. No data migration — one-time loss of
+      -- the in-flight control knobs is acceptable on upgrade.
 
-      -- Generic key-value control state — each knob is one row.
+      -- Generic key-value control state — one row per knob.
       CREATE TABLE control_state (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL
       );
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'standdown', CASE WHEN standdown = 1 THEN 'true' ELSE 'false' END
-        FROM worker_state WHERE id = 1;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'session_standdown', COALESCE(session_standdown_json, 'null')
-        FROM worker_state WHERE id = 1
-        WHERE session_standdown_json IS NOT NULL;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'join_failure_streak', CAST(join_failure_streak AS TEXT)
-        FROM worker_state WHERE id = 1;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'join_backoff_until_ms', CAST(join_backoff_until_ms AS TEXT)
-        FROM worker_state WHERE id = 1;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'last_failed_slot_key', COALESCE('"' || REPLACE(last_failed_slot_key, '"', '\\"') || '"', 'null')
-        FROM worker_state WHERE id = 1
-        WHERE last_failed_slot_key IS NOT NULL;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'current_room', COALESCE(current_room_json, 'null')
-        FROM worker_state WHERE id = 1
-        WHERE current_room_json IS NOT NULL;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'handoff_grace_until_ms', CAST(handoff_grace_until_ms AS TEXT)
-        FROM worker_state WHERE id = 1;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'handoff_grace_slot_key', COALESCE('"' || REPLACE(handoff_grace_slot_key, '"', '\\"') || '"', 'null')
-        FROM worker_state WHERE id = 1
-        WHERE handoff_grace_slot_key IS NOT NULL;
-      INSERT OR REPLACE INTO control_state (key, value_json)
-        SELECT 'last_active_slot_key', COALESCE('"' || REPLACE(last_active_slot_key, '"', '\\"') || '"', 'null')
-        FROM worker_state WHERE id = 1
-        WHERE last_active_slot_key IS NOT NULL;
 
       -- Unified suppressions — one row per active join gate.
       CREATE TABLE suppressions (
@@ -198,24 +170,8 @@ const MIGRATIONS: readonly Migration[] = [
         created_at_ms INTEGER NOT NULL,
         PRIMARY KEY (kind, slot_key)
       );
-      INSERT INTO suppressions SELECT 'global_standdown', standdown, NULL, NULL, NULL,
-        COALESCE((SELECT ts_ms FROM events WHERE kind='override' ORDER BY ts_ms DESC LIMIT 1), 0)
-        FROM worker_state WHERE id=1 AND standdown=1;
-      INSERT INTO suppressions SELECT 'session_standdown', 1,
-        SUBSTR(COALESCE(session_standdown_json,''),2,INSTR(COALESCE(session_standdown_json,''),'@')-2)||'@'||
-        REPLACE(REPLACE(SUBSTR(session_standdown_json, INSTR(session_standdown_json,'startedAt')+12,26),'"',''),'}',''),
-        NULL, session_standdown_json,
-        COALESCE((SELECT MAX(ts_ms) FROM events WHERE kind='override'),0)
-        FROM worker_state WHERE id=1 AND session_standdown_json IS NOT NULL;
-      INSERT INTO suppressions SELECT 'handoff_grace', 1, handoff_grace_slot_key, handoff_grace_until_ms, NULL,
-        COALESCE((SELECT ts_ms FROM events WHERE kind='handoff' ORDER BY ts_ms DESC LIMIT 1),0)
-        FROM worker_state WHERE id=1 AND handoff_grace_slot_key IS NOT NULL;
-      INSERT INTO suppressions SELECT 'join_backoff', 1, last_failed_slot_key, join_backoff_until_ms,
-        CAST(join_failure_streak AS TEXT),
-        COALESCE((SELECT ts_ms FROM events WHERE kind='join_failed' ORDER BY ts_ms DESC LIMIT 1),0)
-        FROM worker_state WHERE id=1 AND join_backoff_until_ms>0;
 
-      -- Sessions: one row per occupied room (schedule, sweep-adopt, force).
+      -- Sessions: first-class room occupancies.
       CREATE TABLE sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         course_id TEXT NOT NULL,
@@ -231,7 +187,7 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_sessions_course ON sessions(course_id);
       CREATE INDEX idx_sessions_entered ON sessions(entered_at_ms);
 
-      -- Tie participant samples to stable session_id.
+      -- Tie participant samples to a stable session_id.
       ALTER TABLE participant_samples ADD COLUMN session_id INTEGER REFERENCES sessions(id);
     `
   }

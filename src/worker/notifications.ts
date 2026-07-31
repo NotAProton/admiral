@@ -806,7 +806,7 @@ function slotBrief(slot: ActiveSlot): string {
 function todaySlots(status: StatusResponse, nowMs: number): { time: string; label: string }[] {
   const weekday = istParts(nowMs).weekday as DayName;
   const out: { time: string; label: string }[] = [];
-  for (const course of status.schedule.courses) {
+  for (const course of status.schedule.config.courses) {
     for (const ws of course.weeklySlots) {
       if (!ws.days.includes(weekday)) continue;
       out.push({ time: `${ws.start}–${ws.end}`, label: `${course.className} (${course.courseId})` });
@@ -821,19 +821,19 @@ function renderMorningPlan(status: StatusResponse, nowMs: number) {
   const lines = [
     `Admiral morning plan — ${date}`,
     "",
-    `System: ${status.state} — ${status.reason}`,
-    `Standdown: ${status.standdown ? "ON" : "off"}`,
+    `System: ${status.control.state} — ${status.control.reason}`,
+    `Standdown: ${status.suppressions.globalStanddown ? "ON" : "off"}`,
     "",
     "Today's classes:"
   ];
   const slots = todaySlots(status, nowMs);
   if (slots.length === 0) lines.push("  (none scheduled today)");
   for (const s of slots) lines.push(`  • ${s.time}  ${s.label}`);
-  if (status.upcomingSlot) {
-    const inMin = minutesFromNow(status.upcomingSlot.startedAt, nowMs);
+  if (status.schedule.upcomingSlot) {
+    const inMin = minutesFromNow(status.schedule.upcomingSlot.startedAt, nowMs);
     lines.push(
       "",
-      `Next class: ${status.upcomingSlot.className} at ${shortIstTime(status.upcomingSlot.startedAt)}${inMin > 0 ? ` (in ~${inMin} min)` : ""}`
+      `Next class: ${status.schedule.upcomingSlot.className} at ${shortIstTime(status.schedule.upcomingSlot.startedAt)}${inMin > 0 ? ` (in ~${inMin} min)` : ""}`
     );
   }
   return { subject: `Admiral morning plan — ${date}`, lines };
@@ -841,20 +841,20 @@ function renderMorningPlan(status: StatusResponse, nowMs: number) {
 
 function renderDailyWrapup(status: StatusResponse, nowMs: number) {
   const date = istDateKey(nowMs);
-  const budget = status.emailBudget;
+  const budget = status.email;
   const lines = [
     `Admiral daily wrap-up — ${date}`,
     "",
     `Today's email activity: ${budget?.emailsToday ?? 0} sent / ${budget?.emailDailyCap ?? 0} daily cap, ${budget?.suppressedToday ?? 0} suppressed.`,
-    `Standdown: ${status.standdown ? "ON" : "off"}`,
+    `Standdown: ${status.suppressions.globalStanddown ? "ON" : "off"}`,
     "",
     "Today's classes:"
   ];
   const slots = todaySlots(status, nowMs);
   if (slots.length === 0) lines.push("  (none scheduled today)");
   for (const s of slots) lines.push(`  • ${s.time}  ${s.label}`);
-  if (status.upcomingSlot) {
-    lines.push("", `Next class: ${status.upcomingSlot.className} at ${shortIstTime(status.upcomingSlot.startedAt)}`);
+  if (status.schedule.upcomingSlot) {
+    lines.push("", `Next class: ${status.schedule.upcomingSlot.className} at ${shortIstTime(status.schedule.upcomingSlot.startedAt)}`);
   }
   return { subject: `Admiral daily wrap-up — ${date}`, lines };
 }
@@ -862,22 +862,22 @@ function renderDailyWrapup(status: StatusResponse, nowMs: number) {
 function statusBlock(status: StatusResponse, nowMs: number): string {
   const lines = [
     `STATUS (as of ${shortIstTime(nowMs)})`,
-    `State: ${status.state} — ${status.reason}`
+    `State: ${status.control.state} — ${status.control.reason}`
   ];
-  if (status.activeSlot) {
+  if (status.schedule.activeSlot) {
     lines.push(
-      `Active: ${status.activeSlot.className} (${shortIstTime(status.activeSlot.startedAt)}–${shortIstTime(status.activeSlot.endsAt)})`
+      `Active: ${status.schedule.activeSlot.className} (${shortIstTime(status.schedule.activeSlot.startedAt)}–${shortIstTime(status.schedule.activeSlot.endsAt)})`
     );
   } else {
     lines.push("Active: no class active right now");
   }
-  if (status.upcomingSlot) {
-    lines.push(`Next: ${status.upcomingSlot.className} at ${shortIstTime(status.upcomingSlot.startedAt)}`);
+  if (status.schedule.upcomingSlot) {
+    lines.push(`Next: ${status.schedule.upcomingSlot.className} at ${shortIstTime(status.schedule.upcomingSlot.startedAt)}`);
   } else {
     lines.push("Next: none scheduled");
   }
   lines.push(
-    `Standdown: ${status.standdown ? "ON" : "off"}${status.sessionStanddown ? ` (session: ${status.sessionStanddown.className})` : ""}`
+    `Standdown: ${status.suppressions.globalStanddown ? "ON" : "off"}${status.suppressions.sessionStanddown ? ` (session: ${status.suppressions.sessionStanddown.className})` : ""}`
   );
   const domain = process.env.ADMIRAL_DOMAIN ?? "admiral";
   lines.push(`Dashboard: https://${domain}`);
