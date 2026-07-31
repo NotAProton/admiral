@@ -12,8 +12,6 @@ const errorBanner = document.getElementById("errorBanner");
 const loginCard = document.getElementById("loginCard");
 const appCard = document.getElementById("appCard");
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-// Sampling runs every ~5 min while InRoom; a larger gap means Admiral was Out.
 const GAP_BREAK_MS = 15 * 60 * 1000;
 
 const knownCourses = new Map(); // courseId -> className (kept across course-filtered reloads)
@@ -122,104 +120,99 @@ function renderAll(fromMs, toMs) {
   renderTable();
 }
 
-function mk(tag, attrs, parent) {
-  const el = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  (parent ?? chart).appendChild(el);
-  return el;
-}
+// ── uPlot chart ──────────────────────────────────────────────────────────
+
+let uplotInstance = null;
 
 function renderChart(fromMs, toMs) {
-  chart.innerHTML = "";
-  const W = 960, H = 260, L = 44, R = 16, T = 14, B = 34;
-  const plotW = W - L - R;
-  const plotH = H - T - B;
+  if (uplotInstance) {
+    uplotInstance.destroy();
+    uplotInstance = null;
+  }
 
   if (samples.length === 0) {
-    const t = mk("text", { x: W / 2, y: H / 2, "text-anchor": "middle", "font-size": 13, fill: "#000000", opacity: 0.6 });
-    t.textContent = "No samples for this window — Admiral only samples while it is in a room.";
+    chart.textContent = "No samples for this window — Admiral only samples while it is in a room.";
+    chart.style.padding = "40px";
+    chart.style.textAlign = "center";
+    chart.style.opacity = "0.6";
     return;
   }
+  chart.style = "";
 
-  const maxCount = Math.max(...samples.map((s) => s.participantCount));
-  const yMax = Math.max(minParticipants + 2, maxCount + 2);
-  const x = (ts) => L + ((ts - fromMs) / (toMs - fromMs)) * plotW;
-  const y = (c) => T + plotH - (c / yMax) * plotH;
+  // Build uPlot data arrays: [ts[], count[], threshold[]]
+  const ts = [];
+  const counts = [];
+  const threshold = [];
 
-  // Axes
-  mk("line", { x1: L, y1: T, x2: L, y2: T + plotH, stroke: "#000000", "stroke-width": 1 });
-  mk("line", { x1: L, y1: T + plotH, x2: L + plotW, y2: T + plotH, stroke: "#000000", "stroke-width": 1 });
-
-  // Hour gridlines + labels (IST)
-  for (let h = 0; h <= 24; h += 2) {
-    const px = x(fromMs + h * 3600_000);
-    mk("line", { x1: px, y1: T + plotH, x2: px, y2: T + plotH + 4, stroke: "#000000", "stroke-width": 1 });
-    if (h % 4 === 0 && h < 24) {
-      const label = mk("text", { x: px, y: T + plotH + 18, "text-anchor": "middle", "font-size": 10, fill: "#000000", opacity: 0.6 });
-      label.textContent = `${String(h).padStart(2, "0")}:00`;
-    }
-  }
-
-  // Y ticks
-  const yStep = Math.max(1, Math.ceil(yMax / 5));
-  for (let c = 0; c <= yMax; c += yStep) {
-    const py = y(c);
-    mk("line", { x1: L - 4, y1: py, x2: L, y2: py, stroke: "#000000", "stroke-width": 1 });
-    const label = mk("text", { x: L - 8, y: py + 3, "text-anchor": "end", "font-size": 10, fill: "#000000", opacity: 0.6 });
-    label.textContent = String(c);
-  }
-
-  // Empty-threshold dashed line
-  mk("line", { x1: L, y1: y(minParticipants), x2: L + plotW, y2: y(minParticipants), stroke: "#1c1c84", "stroke-width": 1.5, "stroke-dasharray": "6 4" });
-  const thLabel = mk("text", { x: L + plotW - 4, y: y(minParticipants) - 5, "text-anchor": "end", "font-size": 10, fill: "#1c1c84" });
-  thLabel.textContent = `empty < ${minParticipants}`;
-
-  // Segments: break on Out-gaps or a room change (e.g. a sweep adoption)
-  const segments = [];
-  let seg = null;
+  // Insert NaN gaps where samples are >= GAP_BREAK_MS apart or slotKey changes
+  let prev = null;
   for (const s of samples) {
-    if (!seg || s.tsMs - seg.last.tsMs > GAP_BREAK_MS || s.slotKey !== seg.last.slotKey) {
-      seg = { key: s.slotKey, className: s.className, adopted: s.adopted, points: [], last: s };
-      segments.push(seg);
+    if (prev && (s.tsMs - prev.tsMs > GAP_BREAK_MS || s.slotKey !== prev.slotKey)) {
+      ts.push(prev.tsMs + 1);
+      counts.push(null);
+      threshold.push(null);
+      ts.push(s.tsMs - 1);
+      counts.push(null);
+      threshold.push(null);
     }
-    seg.points.push(s);
-    seg.last = s;
+    ts.push(s.tsMs / 1000); // uPlot uses seconds
+    counts.push(s.participantCount);
+    threshold.push(minParticipants);
+    prev = s;
   }
 
-  for (const sg of segments) {
-    let d = "";
-    sg.points.forEach((s, i) => {
-      const px = x(s.tsMs);
-      const py = y(s.participantCount);
-      if (i === 0) {
-        d = `M ${px} ${py}`;
-      } else {
-        const prev = sg.points[i - 1];
-        d += ` L ${px} ${y(prev.participantCount)} L ${px} ${py}`;
-      }
-    });
-    mk("path", { d, fill: "none", stroke: "#000000", "stroke-width": sg.adopted ? 2.5 : 1.5 });
+  const opts = {
+    width: chart.clientWidth || 960,
+    height: 260,
+    title: "",
+    cursor: { show: false },
 
-    const first = sg.points[0];
-    const segLabel = mk("text", { x: x(first.tsMs) + 2, y: T + 10, "font-size": 10, fill: "#1c1c84", opacity: 0.9 });
-    segLabel.textContent = `${sg.className ?? sg.key ?? ""}${sg.adopted ? " (adopted)" : ""}`;
+    axes: [
+      {
+        // x-axis: IST time
+        stroke: "#000",
+        grid: { stroke: "#ddd", width: 0.5 },
+        ticks: { stroke: "#000", width: 1 },
+        values: [
+          [3600, "{HH}:{mm}", null, null, null, null, null, null, 2],
+        ],
+      },
+      {
+        // y-axis: participant count
+        stroke: "#000",
+        grid: { stroke: "#ddd", width: 0.5 },
+        ticks: { stroke: "#000", width: 1 },
+        values: (self, ticks) => ticks.map((v) => v < 1e4 ? String(v) : ""),
+      },
+    ],
 
-    for (const s of sg.points) {
-      const below = s.participantCount < minParticipants;
-      const c = mk("circle", {
-        cx: x(s.tsMs),
-        cy: y(s.participantCount),
-        r: below ? 4 : 2.5,
-        fill: below ? "#1c1c84" : "#000000"
-      });
-      if (s.adopted) {
-        mk("circle", { cx: x(s.tsMs), cy: y(s.participantCount), r: 6.5, fill: "none", stroke: "#1c1c84", "stroke-width": 1 });
-      }
-      const title = mk("title", {}, c);
-      title.textContent = `${istTime(s.tsMs)} IST — ${s.participantCount} people — ${s.className ?? s.courseId}${s.adopted ? " (adopted)" : ""}`;
-    }
-  }
+    series: [
+      {},
+      // Series 1: participant count (main line)
+      {
+        label: "Participants",
+        stroke: "#000",
+        width: 1.5,
+        paths: uPlot.paths.stepped({ align: 1 }),
+        points: { show: true, size: 3, stroke: "#000", fill: "#fff" },
+      },
+      // Series 2: empty threshold (dashed reference line)
+      {
+        label: "Empty threshold",
+        stroke: "#1c1c84",
+        width: 1.5,
+        dash: [6, 4],
+        paths: uPlot.paths.stepped({ align: 1 }),
+        points: { show: false },
+      },
+    ],
+  };
+
+  const data = [ts, counts, threshold];
+  uplotInstance = new uPlot(opts, data, chart);
 }
+
+// ── Session cards (unchanged) ───────────────────────────────────────────
 
 function renderSessions() {
   if (samples.length === 0) {

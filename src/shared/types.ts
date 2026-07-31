@@ -160,31 +160,60 @@ export type EmailBudgetSnapshot = {
 
 export type ScheduleSource = "env" | "file" | "url" | "cache";
 
-export type StatusResponse = {
-  state: AdmiralState;
-  standdown: boolean;
-  sessionStanddown: SessionStanddown;
-  reason: string;
-  activeSlot: ActiveSlot | null;
-  upcomingSlot: ActiveSlot | null;
-  currentIstTime: string;
-  schedule: AdmiralConfig;
-  todaySlots: ActiveSlot[];
-  todayOverrides: AppliedDayOverride[];
-  scheduleSource: ScheduleSource;
-  scheduleLoadedAt: string;
-  scheduleUrl: string | null;
-  participantCount: number;
-  participantNames: string[];
-  currentRoom: CurrentRoomInfo | null;
-  roomWatch: RoomWatchInfo;
-  duplicateConfirmed: boolean;
-  duplicateStreak: number;
-  lastHeartbeatAgeSeconds: number | null;
-  heartbeatFresh: boolean;
+/** Legacy flat status — kept for backward compat. Engine now returns V2. */
+export type StatusResponse = StatusResponseV2;
+
+/**
+ * v2 grouped StatusResponse — replaces the 25-field flat grab-bag.
+ * Same data, organized into logical groups. Public API serves this shape;
+ * engine.getStatus() is the single source of truth.
+ */
+export type StatusResponseV2 = {
+  /** IST wall-clock time with offset. */
+  currentTime: string;
+  /** UTC when this status was assembled. */
   updatedAt: string;
-  bbbJoinUrl: string | null;
-  joinBackoffActive: boolean;
-  joinBackoffRemainingSeconds: number | null;
-  emailBudget: EmailBudgetSnapshot | null;
+
+  control: {
+    state: AdmiralState;
+    reason: string;
+  };
+
+  schedule: {
+    config: AdmiralConfig;
+    source: ScheduleSource;
+    loadedAt: string;
+    url: string | null;
+    activeSlot: ActiveSlot | null;
+    upcomingSlot: ActiveSlot | null;
+    /** Today's slots after override application (sorted). */
+    todaySlots: ActiveSlot[];
+    /** Today's persisted overrides. */
+    todayOverrides: AppliedDayOverride[];
+  };
+
+  presence: {
+    currentRoom: CurrentRoomInfo | null;
+    participantCount: number;
+    participantNames: string[];
+    duplicateConfirmed: boolean;
+    duplicateStreak: number;
+    bbbJoinUrl: string | null;
+  };
+
+  watch: RoomWatchInfo;
+
+  suppressions: {
+    globalStanddown: boolean;
+    sessionStanddown: SessionStanddown;
+    joinBackoffActive: boolean;
+    joinBackoffRemainingSeconds: number | null;
+  };
+
+  heartbeat: {
+    fresh: boolean;
+    lastAgeSeconds: number | null;
+  };
+
+  email: EmailBudgetSnapshot | null;
 };

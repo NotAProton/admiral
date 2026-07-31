@@ -23,54 +23,57 @@ const slot: ActiveSlot = {
 
 function stubStatus(): StatusResponse {
   return {
-    state: "Out",
-    standdown: false,
-    sessionStanddown: null,
-    reason: "test",
-    activeSlot: null,
-    upcomingSlot: slot,
-    currentIstTime: "2026-07-29T10:00:00+05:30",
+    currentTime: "2026-07-29T10:00:00+05:30",
+    updatedAt: new Date().toISOString(),
+
+    control: { state: "Out", reason: "test" },
+
     schedule: {
-      timezone: "Asia/Kolkata",
-      heartbeat: { intervalSeconds: 15, freshThresholdSeconds: 20, missingThresholdSeconds: 60 },
-      duplicateDetection: { confirmConsecutiveScrapes: 2, scrapeIntervalSeconds: 10 },
-      courses: [
-        {
-          courseId: slot.courseId,
-          className: slot.className,
-          classPageUrl: slot.classPageUrl,
-          joinLinkText: slot.joinLinkText,
+      config: {
+        timezone: "Asia/Kolkata",
+        heartbeat: { intervalSeconds: 15, freshThresholdSeconds: 20, missingThresholdSeconds: 60 },
+        duplicateDetection: { confirmConsecutiveScrapes: 2, scrapeIntervalSeconds: 10 },
+        courses: [{
+          courseId: slot.courseId, className: slot.className,
+          classPageUrl: slot.classPageUrl, joinLinkText: slot.joinLinkText,
           myDisplayName: slot.myDisplayName,
           weeklySlots: [{ days: ["Wed"], start: "10:00", end: "10:55" }]
-        }
-      ]
+        }]
+      },
+      source: "file",
+      loadedAt: new Date().toISOString(),
+      url: null,
+      activeSlot: null,
+      upcomingSlot: slot,
+      todaySlots: [],
+      todayOverrides: []
     },
-    todaySlots: [],
-    todayOverrides: [],
-    participantCount: 0,
-    participantNames: [],
-    currentRoom: null,
-    roomWatch: {
-      enabled: true,
-      minParticipants: 3,
-      scrapeOk: false,
-      belowThresholdSince: null,
-      sweepsThisSlot: 0,
-      maxSweepsPerSlot: 6,
-      nextSweepRetryAt: null
+
+    presence: {
+      currentRoom: null,
+      participantCount: 0,
+      participantNames: [],
+      duplicateConfirmed: false,
+      duplicateStreak: 0,
+      bbbJoinUrl: null
     },
-    duplicateConfirmed: false,
-    duplicateStreak: 0,
-    lastHeartbeatAgeSeconds: null,
-    heartbeatFresh: false,
-    updatedAt: new Date().toISOString(),
-    bbbJoinUrl: null,
-    joinBackoffActive: false,
-    joinBackoffRemainingSeconds: null,
-    scheduleSource: "file",
-    scheduleLoadedAt: new Date().toISOString(),
-    scheduleUrl: null,
-    emailBudget: null
+
+    watch: {
+      enabled: true, minParticipants: 3, scrapeOk: false,
+      belowThresholdSince: null, sweepsThisSlot: 0,
+      maxSweepsPerSlot: 6, nextSweepRetryAt: null
+    },
+
+    suppressions: {
+      globalStanddown: false,
+      sessionStanddown: null,
+      joinBackoffActive: false,
+      joinBackoffRemainingSeconds: null
+    },
+
+    heartbeat: { fresh: false, lastAgeSeconds: null },
+
+    email: null
   };
 }
 

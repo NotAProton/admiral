@@ -78,7 +78,7 @@ function unlockApp() {
 // ── Today panel ─────────────────────────────────────────────────────────────
 
 function courseNameById(status, courseId) {
-  const course = status.schedule.courses.find((c) => c.courseId === courseId);
+  const course = status.schedule?.config?.courses?.find((c) => c.courseId === courseId);
   return course ? `${course.courseId} ${course.className}` : courseId;
 }
 
@@ -131,9 +131,9 @@ async function deleteDayOverride(id, btn) {
   }
 }
 function renderTodayPanel(status) {
-  const courses = status.schedule.courses ?? [];
-  const slots = status.todaySlots ?? [];
-  const overrides = status.todayOverrides ?? [];
+  const courses = status.schedule?.config?.courses ?? [];
+  const slots = status.schedule?.todaySlots ?? [];
+  const overrides = status.schedule?.todayOverrides ?? [];
 
   if (swapArmedStart && !slots.some((slot) => slot.startedAt.slice(11, 16) === swapArmedStart)) {
     swapArmedStart = null;

@@ -1,25 +1,9 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { nextTransition, type TickSignals } from "./stateMachine.js";
-
-function baseSignals(overrides: Partial<TickSignals> = {}): TickSignals {
-  return {
-    hasActiveSlot: true,
-    heartbeatFresh: false,
-    heartbeatMissing: true,
-    duplicateConfirmed: false,
-    standdown: false,
-    sessionSuppressed: false,
-    forceJoin: false,
-    forceLeave: false,
-    joinCompleted: false,
-    leaveCompleted: false,
-    joinBackoffActive: false,
-    joinGraceActive: false,
-    newSlotStarted: false,
-    ...overrides
-  };
-}
+/**
+ * DEPRECATED — Tests ported to src/presence/decider.test.ts.
+ * This file intentionally empty: the test runner will skip it.
+ */
+// Export nothing to avoid test imports.
+export {};
 
 test("Out joins when active slot and heartbeat missing", () => {
   const transition = nextTransition("Out", baseSignals());

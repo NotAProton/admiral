@@ -32,7 +32,7 @@ import {
 } from "./schedule.js";
 import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
-import { nextTransition } from "./stateMachine.js";
+import { decide, type World } from "../presence/decider.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -333,54 +333,76 @@ export class AdmiralEngine {
       : null;
 
     return {
-      state: this.state,
-      standdown: this.standdown,
-      sessionStanddown: this.sessionStanddownSlot
-        ? {
-            courseId: this.sessionStanddownSlot.courseId,
-            className: this.sessionStanddownSlot.className,
-            startedAt: this.sessionStanddownSlot.startedAt
-          }
-        : null,
-      reason: this.reason,
-      activeSlot: this.activeSlot,
-      upcomingSlot: this.upcomingSlot,
-      currentIstTime: getCurrentIstIso(),
-      schedule: this.config,
-      todaySlots,
-      todayOverrides,
-      participantCount: this.participantSnapshot.count,
-      participantNames: this.participantSnapshot.names,
-      currentRoom: this.currentRoomSlot
-        ? {
-            courseId: this.currentRoomSlot.courseId,
-            className: this.currentRoomSlot.className,
-            adopted: this.adoptedFromSlotKey != null,
-            adoptedFromClassName: this.adoptedFromClassName,
-            enteredAt: this.roomEnteredAtMs > 0 ? new Date(this.roomEnteredAtMs).toISOString() : null
-          }
-        : null,
-      roomWatch: {
+      currentTime: getCurrentIstIso(),
+      updatedAt: new Date().toISOString(),
+
+      control: {
+        state: this.state,
+        reason: this.reason,
+      },
+
+      schedule: {
+        config: this.config,
+        source: this.scheduleSource,
+        loadedAt: this.scheduleLoadedAt,
+        url: this.scheduleUrl,
+        activeSlot: this.activeSlot,
+        upcomingSlot: this.upcomingSlot,
+        todaySlots,
+        todayOverrides,
+      },
+
+      presence: {
+        currentRoom: this.currentRoomSlot
+          ? {
+              courseId: this.currentRoomSlot.courseId,
+              className: this.currentRoomSlot.className,
+              adopted: this.adoptedFromSlotKey != null,
+              adoptedFromClassName: this.adoptedFromClassName,
+              enteredAt: this.roomEnteredAtMs > 0 ? new Date(this.roomEnteredAtMs).toISOString() : null,
+            }
+          : null,
+        participantCount: this.participantSnapshot.count,
+        participantNames: this.participantSnapshot.names,
+        duplicateConfirmed:
+          this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes,
+        duplicateStreak: this.duplicateStreak,
+        bbbJoinUrl: this.bbbJoinUrl,
+      },
+
+      watch: {
         enabled: AdmiralEngine.ROOM_WATCH_ENABLED,
         minParticipants: AdmiralEngine.ROOM_MIN_PARTICIPANTS,
         scrapeOk: this.participantSnapshot.scrapeOk,
-        belowThresholdSince: this.belowThresholdSinceMs != null ? new Date(this.belowThresholdSinceMs).toISOString() : null,
+        belowThresholdSince: this.belowThresholdSinceMs != null
+          ? new Date(this.belowThresholdSinceMs).toISOString()
+          : null,
         sweepsThisSlot: this.sweepsThisSlot,
         maxSweepsPerSlot: AdmiralEngine.ROOM_SWEEP_MAX_PER_SLOT,
-        nextSweepRetryAt: this.nextRoomSweepAtMs != null ? new Date(this.nextRoomSweepAtMs).toISOString() : null
+        nextSweepRetryAt: this.nextRoomSweepAtMs != null
+          ? new Date(this.nextRoomSweepAtMs).toISOString()
+          : null,
       },
-      duplicateConfirmed: this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes,
-      duplicateStreak: this.duplicateStreak,
-      lastHeartbeatAgeSeconds: heartbeatAge,
-      heartbeatFresh,
-      updatedAt: new Date().toISOString(),
-      bbbJoinUrl: this.bbbJoinUrl,
-      joinBackoffActive: this.joinBackoffUntilMs > Date.now(),
-      joinBackoffRemainingSeconds: backoffRemaining,
-      scheduleSource: this.scheduleSource,
-      scheduleLoadedAt: this.scheduleLoadedAt,
-      scheduleUrl: this.scheduleUrl,
-      emailBudget: this.center.getBudgetSnapshot()
+
+      suppressions: {
+        globalStanddown: this.standdown,
+        sessionStanddown: this.sessionStanddownSlot
+          ? {
+              courseId: this.sessionStanddownSlot.courseId,
+              className: this.sessionStanddownSlot.className,
+              startedAt: this.sessionStanddownSlot.startedAt,
+            }
+          : null,
+        joinBackoffActive: this.joinBackoffUntilMs > Date.now(),
+        joinBackoffRemainingSeconds: backoffRemaining,
+      },
+
+      heartbeat: {
+        fresh: heartbeatFresh,
+        lastAgeSeconds: heartbeatAge,
+      },
+
+      email: this.center.getBudgetSnapshot(),
     };
   }
 
@@ -591,125 +613,118 @@ export class AdmiralEngine {
       this.maybeRecordParticipantSample();
       await this.maintainRoomCoverage();
 
-      const heartbeatAge = this.heartbeat.getNewestAgeSeconds();
-      const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
-      const heartbeatMissing = heartbeatAge == null || heartbeatAge >= this.config.heartbeat.missingThresholdSeconds;
-      const duplicateConfirmed = this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes;
-      const joinBackoffActive = Date.now() < this.joinBackoffUntilMs;
+      // ── SENSE: build World snapshot ─────────────────────────────────
+      const now = Date.now();
+      const heartbeatAge = this.heartbeat.getNewestAgeSeconds(now);
+      const heartbeatFresh =
+        heartbeatAge != null &&
+        heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
+      const heartbeatMissing =
+        heartbeatAge == null ||
+        heartbeatAge >= this.config.heartbeat.missingThresholdSeconds;
+
+      // Detect slot transition: new class started.
+      const currentSlotKey = this.activeSlot
+        ? this.sessionKey(this.activeSlot)
+        : null;
+      const newSlotStarted =
+        currentSlotKey != null &&
+        this.lastActiveSlotKey != null &&
+        currentSlotKey !== this.lastActiveSlotKey;
+      this.lastActiveSlotKey = currentSlotKey;
+      this.persistControlState();
+
+      // Handoff grace: active within window for current slot.
       const joinGraceActive =
         this.handoffGraceSlotKey != null &&
         this.activeSlot != null &&
         this.sessionKey(this.activeSlot) === this.handoffGraceSlotKey &&
-        Date.now() < this.handoffGraceUntilMs;
+        now < this.handoffGraceUntilMs;
 
-      // Detect slot transition: a new class has started. When this is true,
-      // Admiral auto-joins regardless of heartbeat status — the heartbeat may
-      // still be "fresh" from the previous session (the user clicked "Join
-      // Myself" and the PWA kept sending heartbeats). We override
-      // heartbeatFresh to false so the state machine's fresh-heartbeat gate
-      // doesn't block the new-slot join.
-      const currentSlotKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
-      const newSlotStarted = currentSlotKey != null && currentSlotKey !== this.lastActiveSlotKey;
-      this.lastActiveSlotKey = currentSlotKey;
-      this.persistControlState();
-
-      const effectiveHeartbeatFresh = newSlotStarted ? false : heartbeatFresh;
-
-      // Session stand-down suppresses auto-join for a specific slot. It is
-      // passed as a separate gate signal (like backoff/duplicate) rather than
-      // by falsifying hasActiveSlot, so the state machine keeps a truthful
-      // picture of the schedule.
+      // Session standdown: active when the schedule slot matches.
       const sessionSuppressed =
         this.activeSlot != null &&
         this.sessionStanddownSlot != null &&
-        this.sessionKey(this.activeSlot) === this.sessionKey(this.sessionStanddownSlot);
+        this.sessionKey(this.activeSlot) ===
+          this.sessionKey(this.sessionStanddownSlot);
 
-      const transition = nextTransition(this.state, {
+      const world: World = {
+        state: this.state,
         hasActiveSlot: this.activeSlot != null,
-        heartbeatFresh: effectiveHeartbeatFresh,
+        activeSlot: this.activeSlot,
+        heartbeatFresh: newSlotStarted ? false : heartbeatFresh,
         heartbeatMissing,
-        duplicateConfirmed,
+        newSlotStarted,
+        duplicateConfirmed:
+          this.duplicateStreak >=
+          this.config.duplicateDetection.confirmConsecutiveScrapes,
         standdown: this.standdown,
         sessionSuppressed,
+        joinBackoffActive: now < this.joinBackoffUntilMs,
+        joinGraceActive,
         forceJoin: this.forceJoinPending,
         forceLeave: this.forceLeavePending,
         joinCompleted: false,
         leaveCompleted: false,
-        joinBackoffActive,
-        joinGraceActive,
-        newSlotStarted
-      });
+      };
 
-      this.reason = transition.reason;
+      // ── DECIDE: pure target computation ─────────────────────────────
+      const decision = decide(world);
+      this.reason = decision.reason;
 
-      if (transition.shouldAttemptJoin && this.state === "Out" && this.activeSlot) {
+      // ── ACT: execute join or leave ──────────────────────────────────
+      if (
+        decision.shouldAttemptJoin &&
+        this.state === "Out" &&
+        this.activeSlot
+      ) {
         this.state = "Joining";
         this.emitStatus();
 
         const joined = await this.performJoin(this.activeSlot);
-        const follow = nextTransition("Joining", {
-          hasActiveSlot: this.activeSlot != null,
-          heartbeatFresh: effectiveHeartbeatFresh,
-          heartbeatMissing,
-          duplicateConfirmed,
-          standdown: this.standdown,
-          sessionSuppressed,
+        const follow = decide({
+          ...world,
+          state: "Joining",
           forceJoin: false,
-          forceLeave: this.forceLeavePending,
           joinCompleted: joined,
-          leaveCompleted: false,
-          joinBackoffActive,
-          joinGraceActive,
-          newSlotStarted
         });
-
         this.state = follow.nextState;
         this.reason = joined ? "Join completed" : "Join failed";
-      } else if (transition.shouldAttemptLeave && this.state !== "Out") {
+      } else if (decision.shouldAttemptLeave && this.state !== "Out") {
         this.state = "Leaving";
         this.emitStatus();
 
         const left = await this.performLeave();
-        const follow = nextTransition("Leaving", {
-          hasActiveSlot: this.activeSlot != null,
-          heartbeatFresh: effectiveHeartbeatFresh,
-          heartbeatMissing,
-          duplicateConfirmed,
-          standdown: this.standdown,
-          sessionSuppressed,
+        const follow = decide({
+          ...world,
+          state: "Leaving",
           forceJoin: false,
           forceLeave: false,
           joinCompleted: false,
           leaveCompleted: left,
-          joinBackoffActive,
-          joinGraceActive,
-          newSlotStarted
         });
-
         this.state = follow.nextState;
+
         if (left) {
           this.persistence.appendEvent({
             kind: "leave_success",
             slot: this.currentRoomSlot,
-            payload: { trigger: transition.reason }
+            payload: { trigger: decision.reason },
           });
-          // Only the handoff case gets its own email; other leave causes
-          // are covered by the session summary or the standdown ack.
-          if (transition.reason.includes("Duplicate")) {
+          if (decision.reason.includes("Duplicate")) {
             this.center.enqueue({
               kind: "handoff",
               slot: this.currentRoomSlot,
-              payload: { slot: this.currentRoomSlot }
+              payload: { slot: this.currentRoomSlot },
             });
-            // Set handoff re-join grace: block auto-rejoin for this slot for a
-            // grace window so Admiral doesn't flap join/leave every ~90s while
-            // the user is in the BBB app with the PWA backgrounded.
             if (this.currentRoomSlot) {
-              this.handoffGraceSlotKey = this.sessionKey(this.currentRoomSlot);
-              this.handoffGraceUntilMs = Date.now() + AdmiralEngine.HANDOFF_GRACE_MS;
+              this.handoffGraceSlotKey = this.sessionKey(
+                this.currentRoomSlot
+              );
+              this.handoffGraceUntilMs =
+                now + AdmiralEngine.HANDOFF_GRACE_MS;
             }
           }
-
           this.resetRoomPresence();
           this.persistControlState();
           this.reason = "Left room";
@@ -717,12 +732,12 @@ export class AdmiralEngine {
           this.persistence.appendEvent({
             kind: "leave_failed",
             slot: this.currentRoomSlot,
-            payload: { reason: this.reason }
+            payload: { reason: this.reason },
           });
           this.reason = "Leave failed";
         }
       } else {
-        this.state = transition.nextState;
+        this.state = decision.nextState;
       }
 
       this.forceJoinPending = false;

@@ -115,8 +115,8 @@ function renderCountdown() {
 
   // Active class countdown (time remaining in slot)
   const classTimeEl = document.getElementById("statClassTime");
-  if (lastStatus.activeSlot) {
-    const endsAt = new Date(lastStatus.activeSlot.endsAt).getTime();
+  if (lastStatus.schedule?.activeSlot) {
+    const endsAt = new Date(lastStatus.schedule.activeSlot.endsAt).getTime();
     const remaining = Math.max(0, Math.round((endsAt - now) / 1000));
     if (classTimeEl) classTimeEl.textContent = `Ends in ${formatDuration(remaining)}`;
   }
@@ -124,25 +124,24 @@ function renderCountdown() {
   // Next class countdown
   const countdownEl = document.getElementById("statCountdown");
   const countdownClassEl = document.getElementById("statCountdownClass");
-  if (lastStatus.upcomingSlot) {
-    const startsAt = new Date(lastStatus.upcomingSlot.startedAt).getTime();
+  if (lastStatus.schedule?.upcomingSlot) {
+    const startsAt = new Date(lastStatus.schedule.upcomingSlot.startedAt).getTime();
     const until = Math.max(0, Math.round((startsAt - now) / 1000));
     if (countdownEl) countdownEl.textContent = formatDuration(until);
-    if (countdownClassEl) countdownClassEl.textContent = lastStatus.upcomingSlot.className;
+    if (countdownClassEl) countdownClassEl.textContent = lastStatus.schedule.upcomingSlot.className;
   } else {
     if (countdownEl) countdownEl.textContent = "--";
     if (countdownClassEl) countdownClassEl.textContent = "No upcoming class";
   }
 
   // Join backoff remaining
-  if (lastStatus.joinBackoffActive && lastStatus.joinBackoffRemainingSeconds != null) {
+  if (lastStatus.suppressions?.joinBackoffActive && lastStatus.suppressions?.joinBackoffRemainingSeconds != null) {
     const statReasonEl = document.getElementById("statReason");
     if (statReasonEl && !statReasonEl.textContent.includes("backoff")) {
-      // don't stomp SSE-driven reason, only append backoff timer
     }
-    const remaining = Math.max(0, lastStatus.joinBackoffRemainingSeconds - Math.round((now - new Date(lastStatus.updatedAt).getTime()) / 1000));
+    const remaining = Math.max(0, (lastStatus.suppressions?.joinBackoffRemainingSeconds ?? 0) - Math.round((now - new Date(lastStatus.updatedAt).getTime()) / 1000));
     const backoffEl = document.getElementById("statReason");
-    if (backoffEl && lastStatus.joinBackoffActive) {
+    if (backoffEl && lastStatus.suppressions?.joinBackoffActive) {
       backoffEl.textContent = `Backing off — resumes in ${formatDuration(remaining)}`;
     }
   }
@@ -160,51 +159,51 @@ const STATE_COLORS = {
 function renderStatus(status) {
   lastStatus = status;
   statusPre.textContent = JSON.stringify(status, null, 2);
-  schedulePre.textContent = JSON.stringify(status.schedule, null, 2);
+  schedulePre.textContent = JSON.stringify(status.schedule?.config, null, 2);
 
-  const age = status.lastHeartbeatAgeSeconds;
-  const fresh = status.heartbeatFresh;
+  const age = status.heartbeat?.lastAgeSeconds;
+  const fresh = status.heartbeat?.fresh;
   hbState.textContent = age == null ? "Heartbeat: none yet" : `Heartbeat: ${age}s ago`;
   hbState.className = `pill ${fresh ? "ok" : "warn"}`;
 
   // State summary card
   const statStateEl = document.getElementById("statState");
   if (statStateEl) {
-    statStateEl.textContent = status.state;
-    statStateEl.style.color = STATE_COLORS[status.state] ?? "";
+    statStateEl.textContent = status.control?.state ?? "--";
+    statStateEl.style.color = STATE_COLORS[status.control?.state] ?? "";
   }
   const statReasonEl = document.getElementById("statReason");
-  if (statReasonEl && !status.joinBackoffActive) statReasonEl.textContent = status.reason;
+  if (statReasonEl && !status.suppressions?.joinBackoffActive) statReasonEl.textContent = status.control?.reason ?? "";
 
   // Active class card
   const statClassEl = document.getElementById("statClass");
   const statClassTimeEl = document.getElementById("statClassTime");
   if (statClassEl) {
-    statClassEl.textContent = status.activeSlot ? status.activeSlot.className : "None";
+    statClassEl.textContent = status.schedule?.activeSlot ? status.schedule.activeSlot.className : "None";
   }
-  if (statClassTimeEl && !status.activeSlot) statClassTimeEl.textContent = "";
+  if (statClassTimeEl && !status.schedule?.activeSlot) statClassTimeEl.textContent = "";
 
   // Participants card
   const statParticipantsEl = document.getElementById("statParticipants");
   const statDuplicateEl = document.getElementById("statDuplicate");
-  if (statParticipantsEl) statParticipantsEl.textContent = status.participantCount;
+  if (statParticipantsEl) statParticipantsEl.textContent = status.presence?.participantCount ?? 0;
   if (statDuplicateEl) {
-    statDuplicateEl.textContent = status.duplicateConfirmed
-      ? "⚠ Duplicate detected"
-      : status.participantCount > 0 ? `${status.duplicateStreak} streak` : "";
+    statDuplicateEl.textContent = status.presence?.duplicateConfirmed
+      ? "\u26a0 Duplicate detected"
+      : (status.presence?.participantCount ?? 0) > 0 ? `${status.presence?.duplicateStreak ?? 0} streak` : "";
   }
 
   // Upcoming class pill
-  if (status.upcomingSlot) {
-    upcomingClass.textContent = `Upcoming: ${status.upcomingSlot.className}`;
+  if (status.schedule?.upcomingSlot) {
+    upcomingClass.textContent = `Upcoming: ${status.schedule.upcomingSlot.className}`;
     upcomingClass.classList.add("pill");
   } else {
     upcomingClass.textContent = "Upcoming: none";
   }
 
   // Session stand-down pill + cancel button
-  if (status.sessionStanddown) {
-    sessionStanddownPill.textContent = `Standing down: ${status.sessionStanddown.className}`;
+  if (status.suppressions?.sessionStanddown) {
+    sessionStanddownPill.textContent = `Standing down: ${status.suppressions.sessionStanddown.className}`;
     sessionStanddownPill.style.display = "flex";
     cancelSessionStanddownBtn.classList.remove("hidden");
   } else {
@@ -213,57 +212,57 @@ function renderStatus(status) {
   }
 
   // Standdown buttons: swap active state
-  document.getElementById("standdownOnBtn").disabled = status.standdown;
-  document.getElementById("standdownOffBtn").disabled = !status.standdown;
+  document.getElementById("standdownOnBtn").disabled = status.suppressions?.globalStanddown ?? false;
+  document.getElementById("standdownOffBtn").disabled = !(status.suppressions?.globalStanddown ?? false);
 
-  // Email budget pill (today's sends vs the IST-day cap)
+  // Email budget pill
   const emailPill = document.getElementById("emailBudgetPill");
-  if (emailPill && status.emailBudget) {
-    emailPill.textContent = `Emails today: ${status.emailBudget.emailsToday}/${status.emailBudget.emailDailyCap}` +
-      (status.emailBudget.suppressedToday > 0 ? ` · ${status.emailBudget.suppressedToday} muted` : "");
+  if (emailPill && status.email) {
+    emailPill.textContent = `Emails today: ${status.email.emailsToday}/${status.email.emailDailyCap}` +
+      (status.email.suppressedToday > 0 ? ` \u00b7 ${status.email.suppressedToday} muted` : "");
   }
 
-  // Schedule source pill (env/file/url/cache + loaded-at time)
+  // Schedule source pill
   const scheduleSourceEl = document.getElementById("scheduleSourcePill");
   if (scheduleSourceEl) {
-    const when = status.scheduleLoadedAt
+    const when = status.schedule?.loadedAt
       ? new Intl.DateTimeFormat("en-IN", {
           timeZone: "Asia/Kolkata",
           hour: "2-digit",
           minute: "2-digit",
           hour12: false
-        }).format(new Date(status.scheduleLoadedAt))
+        }).format(new Date(status.schedule.loadedAt))
       : "--";
-    scheduleSourceEl.textContent = `Schedule: ${status.scheduleSource} @ ${when}` +
-      (status.scheduleUrl ? ` · ${status.scheduleUrl}` : "");
+    scheduleSourceEl.textContent = `Schedule: ${status.schedule?.source ?? "?"} @ ${when}` +
+      (status.schedule?.url ? ` \u00b7 ${status.schedule.url}` : "");
   }
 
-  // Current room pill — adopted rooms (empty-room sweep) show where Admiral moved from
+  // Current room pill
   const roomPill = document.getElementById("currentRoomPill");
   if (roomPill) {
-    if (status.currentRoom) {
-      roomPill.textContent = status.currentRoom.adopted
-        ? `Covering: ${status.currentRoom.className} (moved from ${status.currentRoom.adoptedFromClassName})`
-        : `In room: ${status.currentRoom.className}`;
+    if (status.presence?.currentRoom) {
+      roomPill.textContent = status.presence.currentRoom.adopted
+        ? `Covering: ${status.presence.currentRoom.className} (moved from ${status.presence.currentRoom.adoptedFromClassName})`
+        : `In room: ${status.presence.currentRoom.className}`;
       roomPill.style.display = "";
     } else {
       roomPill.style.display = "none";
     }
   }
 
-  // Room watch pill — empty-room evaluation progress and sweep retry countdown
+  // Room watch pill
   const watchPill = document.getElementById("roomWatchPill");
   if (watchPill) {
-    const rw = status.roomWatch;
+    const rw = status.watch;
     let text = "";
     if (rw && rw.enabled) {
       if (rw.belowThresholdSince) {
         const mins = Math.max(0, Math.round((Date.now() - new Date(rw.belowThresholdSince).getTime()) / 60000));
-        text = `Room looks empty (${status.participantCount}/${rw.minParticipants}) — watching ${mins}m`;
+        text = `Room looks empty (${status.presence?.participantCount ?? 0}/${rw.minParticipants}) — watching ${mins}m`;
       } else if (rw.nextSweepRetryAt) {
         const secs = Math.max(0, Math.round((new Date(rw.nextSweepRetryAt).getTime() - Date.now()) / 1000));
         text = `No populated room — rechecking in ${formatDuration(secs)}`;
-      } else if (status.state === "InRoom" && !rw.scrapeOk) {
+      } else if (status.control?.state === "InRoom" && !rw.scrapeOk) {
         text = "Participant scrape failing";
       }
     }
@@ -514,7 +513,7 @@ document.getElementById("standdownOffBtn").addEventListener("click", (e) =>
 );
 
 document.getElementById("standdownSessionBtn").addEventListener("click", (e) => {
-  const sessionName = lastStatus?.activeSlot?.className ?? lastStatus?.upcomingSlot?.className ?? "the next session";
+  const sessionName = lastStatus?.schedule?.activeSlot?.className ?? lastStatus?.schedule?.upcomingSlot?.className ?? "the next session";
   if (!confirm(`Stand down for "${sessionName}" only? Admiral will auto-resume from the following session.`)) return;
   void applyOverride("standdown_session", e.currentTarget);
 });
@@ -524,8 +523,8 @@ document.getElementById("cancelSessionStanddownBtn").addEventListener("click", (
 );
 
 document.getElementById("openJoinBtn").addEventListener("click", () => {
-  if (lastStatus?.bbbJoinUrl) {
-    window.open(lastStatus.bbbJoinUrl, "_blank", "noopener,noreferrer");
+  if (lastStatus?.presence?.bbbJoinUrl) {
+    window.open(lastStatus.presence.bbbJoinUrl, "_blank", "noopener,noreferrer");
   }
 });
 
