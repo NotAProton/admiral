@@ -294,5 +294,20 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => undefined);
 }
 
+// A backgrounded/locked phone can silently drop the SSE connection without
+// ever firing onerror until the tab is foregrounded again. Force a status
+// refresh and reconnect the stream if needed when the page becomes visible,
+// so this panel doesn't sit on stale data (this page had no such listener
+// at all, unlike the main dashboard).
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    void refreshStatus();
+    if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
+      sseReconnectDelay = 3000;
+      connectEvents();
+    }
+  }
+});
+
 void refreshStatus();
 connectEvents();

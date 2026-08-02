@@ -29,7 +29,7 @@ function makeCtx(overrides: Partial<TickContext> = {}): TickContext {
     },
     rwConfig: {
       enabled: true, minParticipants: 3, graceMs: 300_000, confirmMs: 300_000,
-      sweepRetryMs: 900_000, sweepMaxPerSlot: 6, probeSettleMs: 25_000, scrapeFailLeaveThreshold: 3
+      sweepRetryMs: 900_000, sweepMaxPerSlot: 6, scrapeFailLeaveThreshold: 3
     },
     notify: null as never,
     persistence: null as never,

@@ -364,7 +364,7 @@ export class NotificationCenter {
     const monthStart = istMonthStartMs(nowMs);
     const today = this.p.countEmailsSince(dayStart);
     const month = this.p.countEmailsSince(monthStart);
-    if (month >= this.caps.hardMonthly)
+    if (month >= this.caps.hardMonthly && priority >= 1)
       return { allowed: false, reason: "monthly cap reached (P0-only mode)" };
     if (today >= this.caps.hardDaily) return { allowed: false, reason: "daily hard cap reached" };
     if (priority >= 1 && today >= this.caps.p1Daily)

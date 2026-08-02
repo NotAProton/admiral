@@ -643,6 +643,16 @@ document.getElementById("logoutBtn").addEventListener("click", async () => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     void sendHeartbeat();
+    // A backgrounded/locked phone can silently drop the SSE connection
+    // (mobile browsers suspend network activity in the background) without
+    // ever firing onerror until the tab is foregrounded again. Force a
+    // status refresh now and reconnect the stream if it isn't open, so the
+    // dashboard doesn't sit on stale data after the phone comes back.
+    void refreshStatus();
+    if (!eventSource || eventSource.readyState !== EventSource.OPEN) {
+      sseReconnectDelay = 3000;
+      connectEvents();
+    }
   }
 });
 

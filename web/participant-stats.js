@@ -223,6 +223,20 @@ function renderChart(fromMs, toMs) {
   uplotInstance = new uPlotLib(opts, data, chart);
 }
 
+// Keep the chart's pixel width in sync with its container. Without this,
+// rotating a phone (or resizing the window) leaves the chart at its
+// creation-time width until the next 60s auto-refresh recreates it —
+// meaning a clipped/overflowing chart for up to a minute right after
+// rotating to check it, which is exactly when someone would do so.
+let resizeRaf = null;
+window.addEventListener("resize", () => {
+  if (resizeRaf != null) cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = null;
+    if (uplotInstance) uplotInstance.setSize({ width: chart.clientWidth || 960, height: 260 });
+  });
+});
+
 // ── Session cards (unchanged) ───────────────────────────────────────────
 
 function renderSessions() {
@@ -283,4 +297,10 @@ courseSelect.addEventListener("change", () => void load());
 dateInput.value = istTodayStr();
 void load();
 setInterval(() => void load(), 60_000);
+
+// Get fresh data (and a correctly-sized chart) as soon as the tab/app comes
+// back to the foreground, instead of waiting up to 60s for the next poll.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void load();
+});
 

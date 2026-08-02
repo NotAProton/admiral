@@ -37,12 +37,16 @@
       .brand::before { content: "■"; color: var(--accent); margin-right: 10px; }
       .brand-sub { margin-left: 14px; font-size: 11px; font-weight: 400; letter-spacing: 1px; opacity: 0.65; text-transform: uppercase; }
       .shell { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; display: grid; gap: 16px; }
-      .app { display: grid; gap: 16px; }
+      /* Grid items default to min-width: auto, so any unbreakable long
+         content inside (e.g. a <select>'s selected option text) would
+         otherwise blow out this track and overflow the page horizontally
+         on narrow screens instead of wrapping/shrinking. */
+      .app { display: grid; gap: 16px; min-width: 0; }
       .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
       .hidden { display: none !important; }
       .muted { opacity: 0.6; font-size: 12px; }
       .hint { margin-top: 10px; font-size: 12px; opacity: 0.6; }
-      .panel { background: var(--bg); border: 2px solid var(--ink); padding: 16px; }
+      .panel { background: var(--bg); border: 2px solid var(--ink); padding: 16px; min-width: 0; }
       .panel-title {
         font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
         border-bottom: 1px solid var(--ink); padding-bottom: 8px; margin-bottom: 12px;
@@ -88,6 +92,21 @@
       @media (max-width: 640px) {
         .shell { padding: 16px 12px 40px; }
         .brand-sub { display: block; margin-left: 0; margin-top: 2px; }
+        /* Prevent iOS Safari auto-zoom on input focus (triggers below 16px). */
+        input, select { font-size: 16px; }
+        /* A long class name otherwise gets squeezed into a narrow column next
+           to the Cancel/Swap/Undo buttons. Stack the actions below instead. */
+        .today-row, .override-row { flex-wrap: wrap; }
+        .today-slot { flex-basis: 100%; }
+        /* The "add class" controls (course select, start/end time, button)
+           default to shrink-to-content widths, which on a narrow phone
+           produces a cramped, ragged wrap (e.g. the course select showing
+           only its dropdown arrow with no room for the label). Give each
+           control an explicit basis so they form a clean, full-width stack:
+           select on its own line, start/end time side by side, button below. */
+        .today-add-row select { flex: 1 1 100%; min-width: 0; }
+        .today-add-row input[type="time"] { flex: 1 1 calc(50% - 4px); min-width: 0; }
+        .today-add-row button { flex: 1 1 100%; }
       }
     </style>
   </head>

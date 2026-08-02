@@ -25,29 +25,30 @@ export class BbbSession {
   async join(input: JoinInput): Promise<void> {
     await this.close();
 
-    this.browser = await chromium.launch({
-      headless: input.headless,
-      args: [
-        "--use-fake-ui-for-media-stream",
-        "--autoplay-policy=no-user-gesture-required",
-        "--disable-dev-shm-usage"
-      ]
-    });
-
-    this.context = await this.browser.newContext({
-      ignoreHTTPSErrors: true,
-      viewport: { width: 1440, height: 900 },
-      ...(input.authStatePath ? { storageState: input.authStatePath } : {})
-    });
-
-    this.page = await this.context.newPage();
-
     try {
+      this.browser = await chromium.launch({
+        headless: input.headless,
+        args: [
+          "--use-fake-ui-for-media-stream",
+          "--autoplay-policy=no-user-gesture-required",
+          "--disable-dev-shm-usage"
+        ]
+      });
+
+      this.context = await this.browser.newContext({
+        ignoreHTTPSErrors: true,
+        viewport: { width: 1440, height: 900 },
+        ...(input.authStatePath ? { storageState: input.authStatePath } : {})
+      });
+
+      this.page = await this.context.newPage();
+
       await this.doJoinFlow(input);
     } catch (error) {
       // A failed join must not leave a zombie browser holding memory/CPU until
       // the next join attempt. Close everything, then rethrow so the engine
-      // records the failure and applies its backoff.
+      // records the failure and applies its backoff. This covers launch/
+      // newContext/newPage failures too, not just doJoinFlow.
       await this.close().catch(() => undefined);
       throw error;
     }

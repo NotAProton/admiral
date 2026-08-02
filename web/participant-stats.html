@@ -40,12 +40,15 @@
       .brand::before { content: "■"; color: var(--accent); margin-right: 10px; }
       .brand-sub { margin-left: 14px; font-size: 11px; font-weight: 400; letter-spacing: 1px; opacity: 0.65; text-transform: uppercase; }
       .shell { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; display: grid; gap: 16px; }
-      .app { display: grid; gap: 16px; }
+      /* Grid items default to min-width: auto, so any unbreakable long
+         content inside would otherwise blow out this track and overflow
+         the page horizontally on narrow screens instead of shrinking. */
+      .app { display: grid; gap: 16px; min-width: 0; }
       .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
       .hidden { display: none !important; }
       .muted { opacity: 0.6; font-size: 12px; }
       .hint { margin-top: 10px; font-size: 12px; opacity: 0.6; }
-      .panel { background: var(--bg); border: 2px solid var(--ink); padding: 16px; }
+      .panel { background: var(--bg); border: 2px solid var(--ink); padding: 16px; min-width: 0; }
       .panel-title {
         font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
         border-bottom: 1px solid var(--ink); padding-bottom: 8px; margin-bottom: 12px;
@@ -86,6 +89,8 @@
       @media (max-width: 640px) {
         .shell { padding: 16px 12px 40px; }
         .brand-sub { display: block; margin-left: 0; margin-top: 2px; }
+        /* Prevent iOS Safari auto-zoom on input focus (triggers below 16px). */
+        input, select { font-size: 16px; }
       }
     </style>
   </head>

@@ -1,4 +1,5 @@
-import type { ActiveSlot, DayOverrideIssue } from "../shared/types.js";
+import type { ActiveSlot } from "../shared/types.js";
+import type { DayOverrideIssue } from "./schedule.js";
 import type { NotificationCenter, NotificationKind } from "./notifications.js";
 
 /**

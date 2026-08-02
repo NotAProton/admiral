@@ -76,7 +76,7 @@ test("handoff grace is active within window", () => {
   );
   assert.equal(s.any, true);
   assert.equal(s.handoffGrace, true);
-  assert.ok(s.reason.includes("handoff"));
+  assert.ok(s.reason.includes("Handoff"));
 });
 
 test("handoff grace expired after window", () => {

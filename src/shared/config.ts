@@ -8,7 +8,13 @@ const dayOverrideSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   cancel: z.array(z.string().min(1)).optional(),
   swap: z.array(z.object({ a: hhmmSchema, b: hhmmSchema })).optional(),
-  add: z.array(z.object({ courseId: z.string().min(1), start: hhmmSchema, end: hhmmSchema })).optional()
+  add: z
+    .array(
+      z
+        .object({ courseId: z.string().min(1), start: hhmmSchema, end: hhmmSchema })
+        .refine((s) => s.start < s.end, { message: "add: start must be before end" })
+    )
+    .optional()
 });
 
 const configSchema = z.object({
@@ -34,7 +40,7 @@ const configSchema = z.object({
           days: z.array(daySchema).min(1),
           start: hhmmSchema,
           end: hhmmSchema
-        })
+        }).refine((s) => s.start < s.end, { message: "weeklySlots: start must be before end" })
       ).min(1)
     })
   ).min(1),

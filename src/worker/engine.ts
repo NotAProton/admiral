@@ -1536,7 +1536,7 @@ export class AdmiralEngine {
         return;
       }
 
-      if (result.config === this.config || JSON.stringify(result.config) === JSON.stringify(this.config)) {
+      if ("unchanged" in result) {
         this.scheduleLoadedAt = result.loadedAt.toISOString();
         this.scheduleSource = result.source;
         return;

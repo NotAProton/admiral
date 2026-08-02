@@ -21,6 +21,13 @@ export type ScheduleLoaderError = {
   keepCurrent: true;
 };
 
+export type ScheduleLoaderUnchanged = {
+  unchanged: true;
+  raw: string;
+  source: ScheduleSource;
+  loadedAt: Date;
+};
+
 export class ScheduleLoader {
   private readonly scheduleUrl?: string;
   private readonly cachePath: string;
@@ -79,7 +86,7 @@ export class ScheduleLoader {
    * if it differs from the current one. If the fetch or parse fails, the caller
    * should keep its current config.
    */
-  async pollFromUrl(): Promise<ScheduleLoaderResult | ScheduleLoaderError> {
+  async pollFromUrl(): Promise<ScheduleLoaderResult | ScheduleLoaderError | ScheduleLoaderUnchanged> {
     if (!this.scheduleUrl) {
       return { error: "No SCHEDULE_URL configured", keepCurrent: true };
     }
@@ -91,7 +98,7 @@ export class ScheduleLoader {
 
     if (this.currentRaw === fetched.raw) {
       return {
-        config: null as unknown as AdmiralConfig,
+        unchanged: true,
         raw: fetched.raw,
         source: "url",
         loadedAt: new Date()

@@ -1,9 +1,23 @@
 import "dotenv/config";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import Fastify from "fastify";
 import { z } from "zod";
 import { createSessionCookie, clearSessionCookie, isAuthenticated } from "./auth.js";
+
+// Constant-time token comparison: avoids leaking the access token via
+// response-time differences on the login endpoint.
+function tokensMatch(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) {
+    // Still do a dummy compare so failure timing doesn't reveal length.
+    timingSafeEqual(aBuf, aBuf);
+    return false;
+  }
+  return timingSafeEqual(aBuf, bBuf);
+}
 
 const app = Fastify({ logger: true });
 
@@ -126,7 +140,7 @@ app.post("/login", async (request, reply) => {
   }
 
   const body = loginSchema.parse(request.body);
-  if (!accessToken || body.token !== accessToken) {
+  if (!accessToken || !tokensMatch(body.token, accessToken)) {
     recordLoginFailure(ip);
     return reply.code(401).send({ error: "Invalid token" });
   }
