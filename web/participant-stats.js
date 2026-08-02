@@ -125,9 +125,20 @@ function renderAll(fromMs, toMs) {
 let uplotInstance = null;
 
 function renderChart(fromMs, toMs) {
+  const uPlotLib = globalThis.uPlot;
+
   if (uplotInstance) {
     uplotInstance.destroy();
     uplotInstance = null;
+  }
+
+  if (!uPlotLib) {
+    chart.textContent = "Chart dependency failed to load (uPlot).";
+    chart.style.padding = "40px";
+    chart.style.textAlign = "center";
+    chart.style.opacity = "0.6";
+    showError("Chart library not loaded. Please reload the page.");
+    return;
   }
 
   if (samples.length === 0) {
@@ -193,7 +204,7 @@ function renderChart(fromMs, toMs) {
         label: "Participants",
         stroke: "#000",
         width: 1.5,
-        paths: uPlot.paths.stepped({ align: 1 }),
+        paths: uPlotLib.paths.stepped({ align: 1 }),
         points: { show: true, size: 3, stroke: "#000", fill: "#fff" },
       },
       // Series 2: empty threshold (dashed reference line)
@@ -202,14 +213,14 @@ function renderChart(fromMs, toMs) {
         stroke: "#1c1c84",
         width: 1.5,
         dash: [6, 4],
-        paths: uPlot.paths.stepped({ align: 1 }),
+        paths: uPlotLib.paths.stepped({ align: 1 }),
         points: { show: false },
       },
     ],
   };
 
   const data = [ts, counts, threshold];
-  uplotInstance = new uPlot(opts, data, chart);
+  uplotInstance = new uPlotLib(opts, data, chart);
 }
 
 // ── Session cards (unchanged) ───────────────────────────────────────────
