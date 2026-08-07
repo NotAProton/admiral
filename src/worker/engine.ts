@@ -34,6 +34,7 @@ import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { decide, type World } from "../presence/decider.js";
 import { computeOvertimeHold } from "../presence/overtime.js";
+import { decideOverrideDrain, originStillEmpty } from "../presence/overrideDecide.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -699,78 +700,51 @@ export class AdmiralEngine {
       const decision = decide(world);
       this.reason = decision.reason;
 
-      // ── ACT: execute join or leave ──────────────────────────────────
-      if (
-        decision.shouldAttemptJoin &&
-        this.state === "Out" &&
-        this.activeSlot
-      ) {
-        this.state = "Joining";
-        this.emitStatus();
-
-        const joined = await this.performJoin(this.activeSlot);
-        const follow = decide({
-          ...world,
-          state: "Joining",
-          forceJoin: false,
-          joinCompleted: joined,
-        });
-        this.state = follow.nextState;
-        this.reason = joined ? "Join completed" : "Join failed";
+      // ── ACT: execute the primary decision ───────────────────────────
+      if (decision.shouldAttemptJoin && this.state === "Out" && this.activeSlot) {
+        await this.runJoinAction(world, now);
       } else if (decision.shouldAttemptLeave && this.state !== "Out") {
-        this.state = "Leaving";
-        this.emitStatus();
-
-        const left = await this.performLeave();
-        const follow = decide({
-          ...world,
-          state: "Leaving",
-          forceJoin: false,
-          forceLeave: false,
-          joinCompleted: false,
-          leaveCompleted: left,
+        await this.runLeaveAction({
+          world,
+          now,
+          trigger: decision.reason,
+          isHandoff: decision.reason.includes("Duplicate")
         });
-        this.state = follow.nextState;
-
-        if (left) {
-          const leavePayload: Record<string, unknown> = { trigger: decision.reason };
-          if (this.overtimeEndCause) leavePayload.overtimeEndCause = this.overtimeEndCause;
-          this.persistence.appendEvent({
-            kind: "leave_success",
-            slot: this.currentRoomSlot,
-            payload: leavePayload,
-          });
-          if (decision.reason.includes("Duplicate")) {
-            this.center.enqueue({
-              kind: "handoff",
-              slot: this.currentRoomSlot,
-              payload: { slot: this.currentRoomSlot },
-            });
-            if (this.currentRoomSlot) {
-              this.handoffGraceSlotKey = this.sessionKey(
-                this.currentRoomSlot
-              );
-              this.handoffGraceUntilMs =
-                now + AdmiralEngine.HANDOFF_GRACE_MS;
-            }
-          }
-          this.resetRoomPresence();
-          this.persistControlState();
-          this.reason = "Left room";
-        } else {
-          this.persistence.appendEvent({
-            kind: "leave_failed",
-            slot: this.currentRoomSlot,
-            payload: { reason: this.reason },
-          });
-          this.reason = "Leave failed";
-        }
       } else {
         this.state = decision.nextState;
       }
 
-      this.forceJoinPending = false;
-      this.forceLeavePending = false;
+      // Re-drain (bounded to one extra action per tick): honor a force override
+      // that arrived WHILE the primary action was in flight. A long join/leave
+      // can run for minutes on flaky network (the train scenario), so an
+      // override landing in that window must not be dropped — previously the
+      // flags were unconditionally cleared at the end of the tick, silently
+      // swallowing a Force Leave / Force Join tap. The pure decision keeps this
+      // testable (presence/overrideDecide.ts).
+      const drain = decideOverrideDrain({
+        forceJoinPending: this.forceJoinPending,
+        forceLeavePending: this.forceLeavePending,
+        state: this.state,
+        hasActiveSlot: this.activeSlot != null
+      });
+      if (drain.action === "leave") {
+        await this.runLeaveAction({
+          world: { ...world, state: this.state, forceJoin: false, forceLeave: true },
+          now,
+          trigger: "Manual force-leave override",
+          isHandoff: false
+        });
+      } else if (drain.action === "join") {
+        await this.runJoinAction({ ...world, state: this.state, forceJoin: true, forceLeave: false }, now);
+      }
+
+      // Drop any force override that is honored (already consumed inside the
+      // action methods) or is NOT actionable this tick (e.g. force_join when no
+      // class is active). Keeping a non-actionable flag around would fire it
+      // unpredictably at a later slot.
+      if (drain.consumeJoin) this.forceJoinPending = false;
+      if (drain.consumeLeave) this.forceLeavePending = false;
+
       this.emitStatus();
 
       // Non-blocking email flush: a slow/hung Resend API must never stall the
@@ -786,6 +760,90 @@ export class AdmiralEngine {
     } finally {
       this.tickInFlight = false;
     }
+  }
+
+  /**
+   * Executes one join-to-room action and the resulting state transition.
+   * Consumes `forceJoinPending` once the attempt is made (one-shot, matching the
+   * original behaviour) so a force_join cannot spuriously re-fire, while still
+   * being honored on the very tick it is set — even when set mid-flight.
+   */
+  private async runJoinAction(world: World, now: number): Promise<void> {
+    this.state = "Joining";
+    this.emitStatus();
+
+    const joined = await this.performJoin(this.activeSlot!);
+    const follow = decide({
+      ...world,
+      state: "Joining",
+      forceJoin: false,
+      joinCompleted: joined
+    });
+    this.state = follow.nextState;
+    this.reason = joined ? "Join completed" : "Join failed";
+
+    this.forceJoinPending = false;
+  }
+
+  /**
+   * Executes one leave-room action and the resulting state transition
+   * (leave_success / handoff grace / presence reset). Consumes `forceLeavePending`
+   * once the attempt is made so a force_leave is honored even when set mid-flight
+   * rather than silently dropped at the end of the tick.
+   */
+  private async runLeaveAction(opts: {
+    world: World;
+    now: number;
+    trigger: string;
+    isHandoff: boolean;
+  }): Promise<void> {
+    const { world, now, trigger, isHandoff } = opts;
+    this.state = "Leaving";
+    this.emitStatus();
+
+    const left = await this.performLeave();
+    const follow = decide({
+      ...world,
+      state: "Leaving",
+      forceJoin: false,
+      forceLeave: false,
+      joinCompleted: false,
+      leaveCompleted: left
+    });
+    this.state = follow.nextState;
+
+    if (left) {
+      const leavePayload: Record<string, unknown> = { trigger };
+      if (this.overtimeEndCause) leavePayload.overtimeEndCause = this.overtimeEndCause;
+      this.persistence.appendEvent({
+        kind: "leave_success",
+        slot: this.currentRoomSlot,
+        payload: leavePayload
+      });
+      if (isHandoff) {
+        this.center.enqueue({
+          kind: "handoff",
+          slot: this.currentRoomSlot,
+          payload: { slot: this.currentRoomSlot }
+        });
+        if (this.currentRoomSlot) {
+          this.handoffGraceSlotKey = this.sessionKey(this.currentRoomSlot);
+          this.handoffGraceUntilMs = now + AdmiralEngine.HANDOFF_GRACE_MS;
+        }
+      }
+      this.resetRoomPresence();
+      this.persistControlState();
+      this.reason = "Left room";
+    } else {
+      this.persistence.appendEvent({
+        kind: "leave_failed",
+        slot: this.currentRoomSlot,
+        payload: { reason: this.reason }
+      });
+      this.reason = "Leave failed";
+    }
+
+    this.forceLeavePending = false;
   }
 
   private async refreshParticipantsIfDue(force = false): Promise<void> {
@@ -1081,7 +1139,11 @@ export class AdmiralEngine {
       await this.handleScrapeDeadRoom();
     }
 
-    // (e) Run a pending sweep.
+    // (e) Run a pending sweep. Sweep initiation is NOT gated on the heartbeat:
+    // a genuinely moved class is still hunted even while the dashboard is open.
+    // The per-probe abort in performRoomSweep (fresh heartbeat) plus the origin
+    // re-verification (Part B) are what keep us from abandoning a user who
+    // joined their class late — not gating the start itself.
     if (this.roomSweepPending) {
       this.roomSweepPending = false;
       if (
@@ -1161,6 +1223,7 @@ export class AdmiralEngine {
     }
 
     try {
+      this.lastTickMs = Date.now();
       const slotKey = this.sessionKey(slot);
       const runtimeDir = runtimePrefixForSlot(slot);
 
@@ -1191,8 +1254,9 @@ export class AdmiralEngine {
         headless: this.headless,
         moodleUsername: process.env.MOODLE_USERNAME,
         moodlePassword: process.env.MOODLE_PASSWORD,
-        displayNameOverride: process.env.DISPLAY_NAME
+        displayNameOverride: slot.myDisplayName
       });
+      this.lastTickMs = Date.now();
 
       this.currentRoomSlot = slot;
       // Force a fresh scrape so duplicate detection and the baseline sample
@@ -1285,8 +1349,10 @@ export class AdmiralEngine {
     }
 
     try {
+      this.lastTickMs = Date.now();
       await this.bbb.saveProof(".runtime/worker/leave");
       await this.bbb.leave();
+      this.lastTickMs = Date.now();
       return true;
     } catch (error) {
       this.reason = `Leave failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1318,6 +1384,7 @@ export class AdmiralEngine {
     count: number;
     scrapeOk: boolean;
     joinUrl: string | null;
+    authStatePath: string | null;
     snapshot: ParticipantSnapshot | null;
     error?: string;
   }> {
@@ -1342,7 +1409,7 @@ export class AdmiralEngine {
         headless: this.headless,
         moodleUsername: process.env.MOODLE_USERNAME,
         moodlePassword: process.env.MOODLE_PASSWORD,
-        displayNameOverride: process.env.DISPLAY_NAME
+        displayNameOverride: course.myDisplayName
       });
 
       // Participants render asynchronously; settle, then take the better of
@@ -1360,16 +1427,17 @@ export class AdmiralEngine {
             : first;
 
       if (best.scrapeOk && best.count >= AdmiralEngine.ROOM_MIN_PARTICIPANTS) {
-        return { count: best.count, scrapeOk: true, joinUrl: resolved.joinUrl, snapshot: best };
+        return { count: best.count, scrapeOk: true, joinUrl: resolved.joinUrl, authStatePath: resolved.authStatePath, snapshot: best };
       }
 
       await this.bbb.leave().catch(() => undefined);
-      return { count: best.count, scrapeOk: best.scrapeOk, joinUrl: null, snapshot: best };
+      return { count: best.count, scrapeOk: best.scrapeOk, joinUrl: null, authStatePath: null, snapshot: best };
     } catch (error) {
       return {
         count: 0,
         scrapeOk: false,
         joinUrl: null,
+        authStatePath: null,
         snapshot: null,
         error: error instanceof Error ? error.message : String(error)
       };
@@ -1458,13 +1526,21 @@ export class AdmiralEngine {
       this.reason = `Room sweep #${this.sweepsThisSlot}: probing ${course.className} (${i + 1}/${candidates.length})`;
       this.emitStatus();
 
-      // Abort between probes if the world changed or the user intervened.
+      // Abort between probes if the world changed, the user intervened, or the
+      // heartbeat went fresh (the user is now actively engaged — do not roam).
       const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
-      if (currentKey !== originKey || this.standdown || this.forceLeavePending) {
+      if (currentKey !== originKey || this.standdown || this.forceLeavePending || this.heartbeatFreshNow()) {
         this.persistence.appendEvent({
           kind: "room_sweep_abort",
           slot: originSlot,
-          payload: { reason: currentKey !== originKey ? "origin slot ended or changed" : "user override", probed }
+          payload: {
+            reason: currentKey !== originKey
+              ? "origin slot ended or changed"
+              : this.heartbeatFreshNow()
+                ? "user active on PWA (heartbeat fresh)"
+                : "user override",
+            probed
+          }
         });
         this.emitStatus();
         return;
@@ -1490,6 +1566,18 @@ export class AdmiralEngine {
       this.emitStatus();
 
       if (probe.scrapeOk && probe.snapshot != null && probe.count >= AdmiralEngine.ROOM_MIN_PARTICIPANTS) {
+        // Part B (sweep safety): before committing to a DIFFERENT room,
+        // re-verify the origin scheduled room is still empty. The class may not
+        // have moved — the user may have just joined it late (train, flaky
+        // signal). verifyOriginStillEmpty leaves the browser inside the origin
+        // room when it is live again (caller keeps covering it); otherwise we
+        // switch back to the qualifying probed room and adopt it.
+        const originStillEmpty = await this.verifyOriginStillEmpty(originSlot);
+        if (!originStillEmpty || !probe.joinUrl) {
+          this.backToOriginAfterFailedVerify(originSlot, originKey, probed);
+          return;
+        }
+        await this.rejoinForAdoption(course, probe);
         this.adoptProbedRoom(
           course,
           { count: probe.count, joinUrl: probe.joinUrl, snapshot: probe.snapshot },
@@ -1556,6 +1644,135 @@ export class AdmiralEngine {
   }
 
   /**
+   * Part B (sweep safety): re-verify the origin scheduled room is still empty
+   * before adopting a *different* room. The sweep exists because the schedule
+   * can drift, but the class may simply have started late — the user could be
+   * in the origin room right now (train, flaky signal). We leave the probed
+   * room, re-join the origin room, and count heads. Returns true when the origin
+   * is truly empty; when false the browser is LEFT INSIDE the now-live origin
+   * room (the caller should keep covering it). On any failure we are
+   * conservative and return false so we never adopt a wrong room while unable
+   * to confirm the origin.
+   */
+  private async verifyOriginStillEmpty(originSlot: ActiveSlot): Promise<boolean> {
+    try {
+      await this.bbb.leave().catch(() => undefined);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const runtimeDir = `.runtime/worker/sweep-origin-recheck-${timestamp}`;
+      const resolved = await resolveJoinUrl({
+        lmsUrl: process.env.LMS_URL ?? "",
+        username: process.env.MOODLE_USERNAME,
+        password: process.env.MOODLE_PASSWORD,
+        classPageUrl: originSlot.classPageUrl,
+        joinLinkText: originSlot.joinLinkText,
+        headless: this.headless,
+        postClickWaitMs: this.postClickWaitMs,
+        runtimeDir
+      });
+
+      await this.bbb.join({
+        joinUrl: resolved.joinUrl,
+        authStatePath: resolved.authStatePath,
+        headless: this.headless,
+        moodleUsername: process.env.MOODLE_USERNAME,
+        moodlePassword: process.env.MOODLE_PASSWORD,
+        displayNameOverride: originSlot.myDisplayName
+      });
+
+      // Participants render asynchronously; settle, then take the better of two
+      // scrapes so a half-rendered list can't read as "empty".
+      await sleep(AdmiralEngine.ROOM_SWEEP_PROBE_SETTLE_MS);
+      const first = await this.bbb.scrapeParticipants(originSlot.myDisplayName);
+      await sleep(5_000);
+      const second = await this.bbb.scrapeParticipants(originSlot.myDisplayName);
+      const best = !first.scrapeOk
+        ? second
+        : !second.scrapeOk
+          ? first
+          : second.count >= first.count
+            ? second
+            : first;
+
+      // The bot itself joins under originSlot.myDisplayName, so a count of 2+
+      // exact matches means the user is also present (the handoff signal).
+      const userPresent = best.scrapeOk && best.nameExactMatchCount >= 2;
+      const stillEmpty = originStillEmpty(best, AdmiralEngine.ROOM_MIN_PARTICIPANTS);
+
+      this.persistence.appendEvent({
+        kind: "room_sweep_origin_recheck",
+        slot: originSlot,
+        payload: {
+          count: best.scrapeOk ? best.count : null,
+          scrapeOk: best.scrapeOk,
+          userPresent,
+          stillEmpty
+        }
+      });
+      return stillEmpty;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.persistence.appendEvent({
+        kind: "room_sweep_origin_recheck",
+        slot: originSlot,
+        payload: { error: message, stillEmpty: false }
+      });
+      // Cannot confirm the origin is empty — do not adopt a different room.
+      await this.bbb.leave().catch(() => undefined);
+      return false;
+    }
+  }
+
+  /**
+   * Part B: switch the browser from the (verified-empty) origin room back to the
+   * qualifying probed room so it can be adopted. `bbb.join` closes the current
+   * context first, so leaving the origin room is implicit.
+   */
+  private async rejoinForAdoption(
+    course: CourseConfig,
+    probe: { joinUrl: string | null; authStatePath: string | null }
+  ): Promise<void> {
+    if (!probe.joinUrl) return;
+    await this.bbb.join({
+      joinUrl: probe.joinUrl,
+      authStatePath: probe.authStatePath ?? undefined,
+      headless: this.headless,
+      moodleUsername: process.env.MOODLE_USERNAME,
+      moodlePassword: process.env.MOODLE_PASSWORD,
+      displayNameOverride: course.myDisplayName
+    });
+  }
+
+  /**
+   * Part B: the origin room turned out to be live (or couldn't be confirmed
+   * empty), so the class did NOT move — the user is in the scheduled room. Keep
+   * the browser there and let the normal room/duplicate handoff logic take over
+   * instead of covering the wrong room. Halts roaming for this slot.
+   */
+  private backToOriginAfterFailedVerify(
+    originSlot: ActiveSlot,
+    originKey: string,
+    probed: { courseId: string; count: number | null; error?: string }[]
+  ): void {
+    this.currentRoomSlot = originSlot;
+    this.adoptedFromSlotKey = null;
+    this.adoptedFromClassName = null;
+    this.bbbJoinUrl = null;
+    this.state = "InRoom";
+    this.nextRoomSweepAtMs = null;
+    this.sweepHaltedForSlot = true;
+    this.lastScrapeAtMs = Date.now();
+    this.persistControlState();
+    this.onEnteredRoom();
+    this.persistence.appendEvent({
+      kind: "room_sweep_abort",
+      slot: originSlot,
+      payload: { reason: "origin recheck found the class live", probed }
+    });
+    this.reason = `Staying in ${originSlot.className}; class is live (user joined late)`;
+    this.emitStatus();
+  }
+
+  /**
    * No probed room qualified: alert once per slot, rejoin the scheduled room
    * (attendance-safe — the user's chosen behaviour) and arm the re-sweep timer.
    */
@@ -1606,6 +1823,13 @@ export class AdmiralEngine {
   getLastTickMs(): number {
     return this.lastTickMs;
   }
+
+  /** True when the newest PWA heartbeat is within the fresh threshold. */
+  private heartbeatFreshNow(): boolean {
+    const age = this.heartbeat.getNewestAgeSeconds();
+    return age != null && age <= this.config.heartbeat.freshThresholdSeconds;
+  }
+
 
   /** True if the engine has ticked recently enough to be considered alive. */
   isAlive(): boolean {
