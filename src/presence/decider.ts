@@ -21,6 +21,8 @@ export type AdmiralState = "Out" | "Joining" | "InRoom" | "Leaving";
 export type World = {
   state: AdmiralState;
   hasActiveSlot: boolean;
+  /** True when the slot has ended but the room is being held (overtime). */
+  overtimeHold: boolean;
   activeSlot: ActiveSlot | null;
   heartbeatFresh: boolean;
   heartbeatMissing: boolean;
@@ -137,7 +139,11 @@ export function decide(world: World): Decision {
   }
 
   if (world.state === "InRoom") {
-    if (!world.hasActiveSlot || world.duplicateConfirmed || world.sessionSuppressed) {
+    // Treat "slot ended" as a leave only when we are not holding it open for
+    // overtime (a teacher still running a few minutes over). Every other leave
+    // trigger still wins even during overtime.
+    const slotGone = !world.hasActiveSlot && !world.overtimeHold;
+    if (slotGone || world.duplicateConfirmed || world.sessionSuppressed) {
       return {
         nextState: "Leaving",
         reason: world.duplicateConfirmed

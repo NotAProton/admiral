@@ -33,6 +33,7 @@ import {
 import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { decide, type World } from "../presence/decider.js";
+import { computeOvertimeHold } from "../presence/overtime.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -93,8 +94,7 @@ export class AdmiralEngine {
   private lastFailedSlotKey: string | null = null;
 
   // ── Room watch (empty-room detection + room sweep) ───────────────────────
-  // Added after the 2026-07-30 stale-schedule incident, where the bot sat
-  // alone in an empty room for hours, silently. Admiral now watches the
+  // Admiral now watches the
   // headcount of whatever room it is in; if it stays below
   // ROOM_MIN_PARTICIPANTS past a grace+confirm window, it leaves and probes
   // the other configured course rooms ("sweep"), adopting the first one with
@@ -111,6 +111,16 @@ export class AdmiralEngine {
   private static readonly ROOM_SWEEP_PROBE_SETTLE_MS = envNumber(process.env.ROOM_SWEEP_PROBE_SETTLE_SECONDS, 25) * 1000;
   private static readonly SCRAPE_FAIL_LEAVE_THRESHOLD = 3;
 
+  // The bot used to leave the instant the slot ended, but teachers often run a
+  // few minutes over and take attendance in the overrun window -> absent. When
+  // the meeting is still clearly alive (see presence/overtime.ts) Admiral now
+  // stays past `endsAt` for up to SLOT_OVERTIME_MAX_SECONDS, leaving early if
+  // the room empties, the user joins, or a new class is about to start (the
+  // wrong-room guard) — a late-running class never delays the next one.
+  private static readonly SLOT_OVERTIME_ENABLED = envBoolean(process.env.SLOT_OVERTIME_ENABLED, true);
+  private static readonly SLOT_OVERTIME_MAX_MS = envNumber(process.env.SLOT_OVERTIME_MAX_SECONDS, 600) * 1000;
+  private static readonly SLOT_OVERTIME_EMPTY_SCRAPES = envNumber(process.env.SLOT_OVERTIME_EMPTY_SCRAPES, 3);
+
   private roomEnteredAtMs = 0;
   private belowThresholdSinceMs: number | null = null;
   private scrapeFailStreak = 0;
@@ -124,6 +134,13 @@ export class AdmiralEngine {
   private adoptedFromSlotKey: string | null = null;
   private adoptedFromClassName: string | null = null;
   private lastEvaluatedScrapeAtMs = 0;
+
+  // ── Slot overtime hold state ─────────────────────────────────────────────
+  private overtimeActive = false;
+  private overtimeSinceMs = 0;
+  private overtimeBelowStreak = 0;
+  private overtimeSlotKey: string | null = null;
+  private overtimeEndCause: string | null = null;
 
   // ── Participant-count sampling (drives /participant-stats) ───────────────
   private static readonly PARTICIPANT_SAMPLE_MS = envNumber(process.env.PARTICIPANT_SAMPLE_SECONDS, 300) * 1000;
@@ -368,6 +385,13 @@ export class AdmiralEngine {
           this.duplicateStreak >= this.config.duplicateDetection.confirmConsecutiveScrapes,
         duplicateStreak: this.duplicateStreak,
         bbbJoinUrl: this.bbbJoinUrl,
+        overtime: this.overtimeActive
+          ? {
+              active: true,
+              since: this.overtimeSinceMs > 0 ? new Date(this.overtimeSinceMs).toISOString() : null,
+              capSeconds: AdmiralEngine.SLOT_OVERTIME_MAX_MS / 1000
+            }
+          : null,
       },
 
       watch: {
@@ -648,9 +672,12 @@ export class AdmiralEngine {
         this.sessionKey(this.activeSlot) ===
           this.sessionKey(this.sessionStanddownSlot);
 
+      const overtimeHold = this.computeOvertimeHold(now);
+
       const world: World = {
         state: this.state,
         hasActiveSlot: this.activeSlot != null,
+        overtimeHold,
         activeSlot: this.activeSlot,
         heartbeatFresh: newSlotStarted ? false : heartbeatFresh,
         heartbeatMissing,
@@ -706,10 +733,12 @@ export class AdmiralEngine {
         this.state = follow.nextState;
 
         if (left) {
+          const leavePayload: Record<string, unknown> = { trigger: decision.reason };
+          if (this.overtimeEndCause) leavePayload.overtimeEndCause = this.overtimeEndCause;
           this.persistence.appendEvent({
             kind: "leave_success",
             slot: this.currentRoomSlot,
-            payload: { trigger: decision.reason },
+            payload: leavePayload,
           });
           if (decision.reason.includes("Duplicate")) {
             this.center.enqueue({
@@ -814,6 +843,12 @@ export class AdmiralEngine {
     }
     this.scrapeFailStreak = 0;
 
+    // While holding the room in overtime, the overtime logic owns empty-room
+    // detection (it exits on the same headcount signal but on a faster cadence).
+    // Keep dead-scrape handling above (a truly-ended meeting must still leave),
+    // but skip the slower room-watch empty/sweep path.
+    if (this.overtimeActive) return;
+
     // Grace period: people trickle in after the join, and classes start late.
     if (now - this.roomEnteredAtMs < AdmiralEngine.ROOM_EMPTY_GRACE_MS) return;
 
@@ -882,6 +917,93 @@ export class AdmiralEngine {
     this.belowThresholdSinceMs = null;
     this.scrapeFailStreak = 0;
     this.lastEvaluatedScrapeAtMs = 0;
+    this.clearOvertime();
+  }
+
+  /** Resets all overtime-hold bookkeeping (after any leave or a real slot resumes). */
+  private clearOvertime(): void {
+    this.overtimeActive = false;
+    this.overtimeSinceMs = 0;
+    this.overtimeBelowStreak = 0;
+    this.overtimeSlotKey = null;
+    // overtimeEndCause is intentionally NOT cleared here: it is set in sense()
+    // right before a leave and consumed by the leave_success event in the same
+    // tick (resetRoomPresence runs after that append). It self-resets each tick.
+  }
+
+  /**
+   * Slot-overtime hold: whether to keep the scheduled room open past its end
+   * (see presence/overtime.ts). Advances overtime bookkeeping and records the
+   * hold start / end-cause for the audit log. Returns the `overtimeHold` signal
+   * the decider consumes via World.
+   */
+  private computeOvertimeHold(nowMs: number): boolean {
+    this.overtimeEndCause = null;
+    if (!AdmiralEngine.SLOT_OVERTIME_ENABLED) {
+      this.clearOvertime();
+      return false;
+    }
+    // Overtime only while physically in the scheduled room.
+    if (this.state !== "InRoom" || this.adoptedFromSlotKey != null || this.currentRoomSlot == null) {
+      this.clearOvertime();
+      return false;
+    }
+
+    // A real active slot always wins: stop holding so the wrong-room guard can
+    // leave for the next class. Remember why we stopped for the leave event.
+    if (this.activeSlot != null) {
+      if (this.overtimeActive && this.overtimeSlotKey === this.sessionKey(this.currentRoomSlot)) {
+        this.overtimeEndCause = "next_slot";
+      }
+      this.clearOvertime();
+      return false;
+    }
+
+    const decision = computeOvertimeHold({
+      nowMs,
+      state: this.state,
+      activeSlot: this.activeSlot,
+      roomSlot: this.currentRoomSlot,
+      adopted: false,
+      snapshot: this.participantSnapshot,
+      belowStreak: this.overtimeBelowStreak,
+      config: {
+        enabled: true, // gated by SLOT_OVERTIME_ENABLED above
+        maxMs: AdmiralEngine.SLOT_OVERTIME_MAX_MS,
+        minParticipants: AdmiralEngine.ROOM_MIN_PARTICIPANTS,
+        emptyScrapes: AdmiralEngine.SLOT_OVERTIME_EMPTY_SCRAPES
+      }
+    });
+
+    this.overtimeBelowStreak = decision.hold ? decision.belowStreak : 0;
+
+    if (decision.hold) {
+      if (!this.overtimeActive) {
+        this.overtimeActive = true;
+        this.overtimeSinceMs = nowMs;
+        this.overtimeSlotKey = this.sessionKey(this.currentRoomSlot);
+        // Overtime owns empty-exit now; a stale room-watch "below threshold"
+        // marker from the slot's tail must not set off the empty-room pill.
+        this.belowThresholdSinceMs = null;
+        this.persistence.appendEvent({
+          kind: "overtime_hold_start",
+          slot: this.currentRoomSlot,
+          payload: {
+            slotEnd: this.currentRoomSlot.endsAt,
+            capSeconds: AdmiralEngine.SLOT_OVERTIME_MAX_MS / 1000,
+            participantCount: this.participantSnapshot.scrapeOk
+              ? this.participantSnapshot.count
+              : null
+          }
+        });
+      }
+      return true;
+    }
+
+    // Hold dropped: record why so the upcoming leave_success can say so.
+    this.overtimeEndCause = decision.endCause ?? this.overtimeEndCause;
+    this.overtimeActive = false;
+    return false;
   }
 
   /**
@@ -903,6 +1025,33 @@ export class AdmiralEngine {
       if (currentKey !== this.adoptedFromSlotKey) {
         await this.endAdoption("Origin slot ended");
       }
+    }
+
+    // (a2) A scheduled-room occupancy that no longer matches the active slot
+    // (back-to-back / zero-gap slots, an override swap, or a new class starting
+    // during overtime) must leave so the normal join logic picks up the correct
+    // current slot. Adopted rooms are handled by (a) above.
+    if (
+      this.state === "InRoom" &&
+      this.adoptedFromSlotKey == null &&
+      this.currentRoomSlot != null &&
+      this.activeSlot != null &&
+      this.sessionKey(this.activeSlot) !== this.sessionKey(this.currentRoomSlot)
+    ) {
+      this.persistence.appendEvent({
+        kind: "leave_success",
+        slot: this.currentRoomSlot,
+        payload: {
+          trigger: "Next class starting",
+          ...(this.overtimeActive ? { overtimeEndCause: "next_slot" } : {})
+        }
+      });
+      await this.performLeave();
+      this.state = "Out";
+      this.reason = "Next class starting";
+      this.resetRoomPresence();
+      this.persistControlState();
+      this.emitStatus();
     }
 
     // (b) Drop the re-sweep timer once its origin slot has passed.

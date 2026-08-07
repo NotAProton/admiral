@@ -87,12 +87,6 @@ export type ParticipantSnapshot = {
   count: number;
   names: string[];
   nameExactMatchCount: number;
-  /**
-   * False when the scrape itself failed (page gone / evaluate threw). A zero
-   * count with scrapeOk=false means "unknown", never "empty room" — the
-   * 2026-07-30 incident showed a silent zero is indistinguishable from a
-   * broken scrape without this flag.
-   */
   scrapeOk: boolean;
 };
 
@@ -199,6 +193,12 @@ export type StatusResponseV2 = {
     duplicateConfirmed: boolean;
     duplicateStreak: number;
     bbbJoinUrl: string | null;
+    /** Non-null while the slot has ended but the room is held in overtime. */
+    overtime: {
+      active: boolean;
+      since: string | null;
+      capSeconds: number;
+    } | null;
   };
 
   watch: RoomWatchInfo;

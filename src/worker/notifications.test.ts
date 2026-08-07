@@ -55,7 +55,8 @@ function stubStatus(): StatusResponse {
       participantNames: [],
       duplicateConfirmed: false,
       duplicateStreak: 0,
-      bbbJoinUrl: null
+      bbbJoinUrl: null,
+      overtime: null
     },
 
     watch: {

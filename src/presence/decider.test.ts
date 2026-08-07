@@ -10,6 +10,7 @@ function baseWorld(overrides: Partial<World> = {}): World {
   return {
     state: "Out",
     hasActiveSlot: true,
+    overtimeHold: false,
     activeSlot: null,
     heartbeatFresh: false,
     heartbeatMissing: true,
@@ -55,6 +56,33 @@ test("InRoom leaves when slot ends", () => {
 
 test("Standdown forces leave from InRoom", () => {
   const d = decide(baseWorld({ state: "InRoom", standdown: true }));
+  assert.equal(d.nextState, "Leaving");
+});
+
+test("InRoom stays when slot ended but overtime hold is active", () => {
+  const d = decide(baseWorld({ state: "InRoom", hasActiveSlot: false, overtimeHold: true }));
+  assert.equal(d.nextState, "InRoom");
+  assert.equal(d.shouldAttemptLeave, false);
+});
+
+test("InRoom leaves when slot ended and overtime hold is off", () => {
+  const d = decide(baseWorld({ state: "InRoom", hasActiveSlot: false, overtimeHold: false }));
+  assert.equal(d.nextState, "Leaving");
+  assert.equal(d.shouldAttemptLeave, true);
+});
+
+test("InRoom leaves during overtime on duplicate handoff", () => {
+  const d = decide(baseWorld({
+    state: "InRoom", hasActiveSlot: false, overtimeHold: true, duplicateConfirmed: true
+  }));
+  assert.equal(d.nextState, "Leaving");
+  assert.equal(d.reason, "Duplicate-name handoff confirmed");
+});
+
+test("InRoom leaves during overtime on session standdown", () => {
+  const d = decide(baseWorld({
+    state: "InRoom", hasActiveSlot: false, overtimeHold: true, sessionSuppressed: true
+  }));
   assert.equal(d.nextState, "Leaving");
 });
 

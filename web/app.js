@@ -324,6 +324,22 @@ function renderStatus(status) {
     watchPill.style.display = text ? "" : "none";
   }
 
+  // Slot overtime pill — shown while the slot has ended but the room is held
+  // open past its scheduled end (teacher taking attendance a few minutes late).
+  const overtimePill = document.getElementById("overtimePill");
+  if (overtimePill) {
+    const ot = status.presence?.overtime;
+    let text = "";
+    if (ot && ot.active) {
+      const sinceMs = ot.since ? new Date(ot.since).getTime() : null;
+      const heldFor = sinceMs ? Math.max(0, Math.round((Date.now() - sinceMs) / 1000)) : 0;
+      const cap = ot.capSeconds ?? 0;
+      text = `Class running over — holding ${formatDuration(heldFor)} (cap ${formatDuration(cap)})`;
+    }
+    overtimePill.textContent = text;
+    overtimePill.style.display = text ? "" : "none";
+  }
+
   renderCountdown();
 }
 
@@ -435,6 +451,7 @@ const HISTORY_KIND_LABELS = {
   join_backoff_start: "Backoff",
   leave_success: "Left room",
   leave_failed: "Leave failed",
+  overtime_hold_start: "Class running over — holding",
   override: "Override",
   email_suppressed: "Email muted",
   email_send_failed: "Email send failed",
@@ -462,6 +479,7 @@ function historyDetailText(event) {
     if (p.action) parts.push(`action: ${p.action}`);
     if (p.rejected) parts.push(`rejected: ${p.rejected}`);
     if (p.trigger) parts.push(String(p.trigger));
+    if (p.overtimeEndCause) parts.push(`overtime end: ${p.overtimeEndCause}`);
     if (p.error) parts.push(String(p.error));
     if (p.reason) parts.push(String(p.reason));
     if (p.note) parts.push(String(p.note));

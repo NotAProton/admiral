@@ -85,6 +85,9 @@ export function buildWorld(
   return {
     state: ctrl.state,
     hasActiveSlot: activeSlot != null,
+    // The test-only buildWorld path does not model room-level overtime (it has
+    // no roomSlot input); the real engine sets this from computeOvertimeHold.
+    overtimeHold: false,
     activeSlot,
     heartbeatFresh: effectiveHeartbeatFresh,
     heartbeatMissing,
