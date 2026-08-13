@@ -33,7 +33,7 @@ import {
 import { ScheduleLoader, type ScheduleLoaderResult } from "./scheduleSource.js";
 import { resolveJoinUrl } from "./resolveJoinUrl.js";
 import { decide, type World } from "../presence/decider.js";
-import { computeOvertimeHold } from "../presence/overtime.js";
+import { computeOvertimeHold, shouldContinueOverrunHold } from "../presence/overtime.js";
 import { decideOverrideDrain, originStillEmpty } from "../presence/overrideDecide.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,6 +122,25 @@ export class AdmiralEngine {
   private static readonly SLOT_OVERTIME_MAX_MS = envNumber(process.env.SLOT_OVERTIME_MAX_SECONDS, 600) * 1000;
   private static readonly SLOT_OVERTIME_EMPTY_SCRAPES = envNumber(process.env.SLOT_OVERTIME_EMPTY_SCRAPES, 3);
 
+  // ── Overrun crossing grace (2026-08-13) ──────────────────────────────────
+  // Plain overtime only helps when there is NO next class. When the next
+  // scheduled class starts while the current room is still clearly live (the
+  // teacher is running over into the next slot), the wrong-room guard used to
+  // abandon the overrun instantly — losing late attendance taken in the
+  // overrun (e.g. the 2026-08-12 IOE411 absence: still 10 people at 13:00,
+  // bot left at 13:05 for the empty CBE411). One browser = one room, so this
+  // is a bounded trade-off: keep the overrunning room for OVERRUN_GRACE_SECONDS
+  // (or until it empties), THEN switch to the next class. It never delays the
+  // next class beyond the grace cap.
+  private static readonly OVERRUN_GRACE_ENABLED = envBoolean(process.env.OVERRUN_GRACE_ENABLED, true);
+  private static readonly OVERRUN_GRACE_SECONDS = envNumber(process.env.OVERRUN_GRACE_SECONDS, 600);
+  private static readonly OVERRUN_GRACE_MS = AdmiralEngine.OVERRUN_GRACE_SECONDS * 1000;
+  // The overrun room is only treated as "still on" while its headcount is at
+  // or above this many people (its own env var, independent of
+  // EMPTY_ROOM_MIN_PARTICIPANTS): "no way 5 people are sitting in a class
+  // that's over."
+  private static readonly OVERRUN_GRACE_PARTICIPANTS = envNumber(process.env.OVERRUN_GRACE_PARTICIPANTS, 5);
+
   private roomEnteredAtMs = 0;
   private belowThresholdSinceMs: number | null = null;
   private scrapeFailStreak = 0;
@@ -142,6 +161,11 @@ export class AdmiralEngine {
   private overtimeBelowStreak = 0;
   private overtimeSlotKey: string | null = null;
   private overtimeEndCause: string | null = null;
+
+  // ── Overrun crossing-hold state (next class started while this room overruns) ──
+  private overrunGraceActive = false;
+  private overrunGraceSinceMs = 0;
+  private overrunGraceSlotKey: string | null = null;
 
   // ── Participant-count sampling (drives /participant-stats) ───────────────
   private static readonly PARTICIPANT_SAMPLE_MS = envNumber(process.env.PARTICIPANT_SAMPLE_SECONDS, 300) * 1000;
@@ -984,6 +1008,9 @@ export class AdmiralEngine {
     this.overtimeSinceMs = 0;
     this.overtimeBelowStreak = 0;
     this.overtimeSlotKey = null;
+    this.overrunGraceActive = false;
+    this.overrunGraceSinceMs = 0;
+    this.overrunGraceSlotKey = null;
     // overtimeEndCause is intentionally NOT cleared here: it is set in sense()
     // right before a leave and consumed by the leave_success event in the same
     // tick (resetRoomPresence runs after that append). It self-resets each tick.
@@ -1007,11 +1034,32 @@ export class AdmiralEngine {
       return false;
     }
 
-    // A real active slot always wins: stop holding so the wrong-room guard can
-    // leave for the next class. Remember why we stopped for the leave event.
+    // A real active slot exists. If it is a DIFFERENT room (the next scheduled
+    // class started while we were sitting in an overrunning room), let the
+    // overrun-crossing grace keep holding before the wrong-room guard abandons
+    // it. If it is the SAME room, we're mid-class: no overtime.
     if (this.activeSlot != null) {
-      if (this.overtimeActive && this.overtimeSlotKey === this.sessionKey(this.currentRoomSlot)) {
-        this.overtimeEndCause = "next_slot";
+      const isNextClass =
+        this.sessionKey(this.activeSlot) !== this.sessionKey(this.currentRoomSlot);
+      if (isNextClass) {
+        const holding = this.shouldHoldOverrunCrossing(nowMs);
+        if (holding) {
+          // Reflect the crossing hold as overtime for the status pill / decider.
+          if (!this.overtimeActive) {
+            this.overtimeActive = true;
+            this.overtimeSinceMs = nowMs;
+            this.overtimeSlotKey = this.sessionKey(this.currentRoomSlot);
+          }
+          this.belowThresholdSinceMs = null;
+          return true;
+        }
+        // Crossing ended (room emptied or grace cap reached): leaving for the
+        // next class — remember why for the leave_success event.
+        if (this.overtimeActive && this.overtimeSlotKey === this.sessionKey(this.currentRoomSlot)) {
+          this.overtimeEndCause = "next_slot";
+        }
+        this.clearOvertime();
+        return false;
       }
       this.clearOvertime();
       return false;
@@ -1054,6 +1102,18 @@ export class AdmiralEngine {
               : null
           }
         });
+        // Notify the user that the class is running over and we are staying
+        // (deduped per session by the notification center).
+        this.center.enqueue({
+          kind: "overtime_hold",
+          slot: this.currentRoomSlot,
+          payload: {
+            participantCount: this.participantSnapshot.scrapeOk
+              ? this.participantSnapshot.count
+              : null,
+            capSeconds: AdmiralEngine.SLOT_OVERTIME_MAX_MS / 1000
+          }
+        });
       }
       return true;
     }
@@ -1062,6 +1122,100 @@ export class AdmiralEngine {
     this.overtimeEndCause = decision.endCause ?? this.overtimeEndCause;
     this.overtimeActive = false;
     return false;
+  }
+
+  /**
+   * Overrun-crossing hold decision: whether to postpone the switch to the next
+   * scheduled class while the CURRENT (overrunning) room is still clearly live.
+   *
+   * Same philosophy as plain overtime but for the case a *real* next slot exists:
+   * "no way <OVERRUN_GRACE_PARTICIPANTS> people are sitting in a class that's
+   * over." Keeps holding only while the overrun room holds >=
+   * OVERRUN_GRACE_PARTICIPANTS people and while the grace window
+   * (OVERRUN_GRACE_SECONDS from first detection) has not expired, so a
+   * late-running class never delays the next one indefinitely.
+   *
+   * The first tick that starts the hold emits an `overrun_grace_start` history
+   * event and an `overrun_grace` notification email (both once per session).
+   * This is engine orchestration (mutation + side effects), deliberately outside
+   * the pure decider — the decider's `overtimeHold` only drives the pill/info.
+   */
+  private shouldHoldOverrunCrossing(nowMs: number): boolean {
+    const cur = this.currentRoomSlot;
+    if (this.state !== "InRoom" || this.adoptedFromSlotKey != null || cur == null || this.activeSlot == null) {
+      this.overrunGraceActive = false;
+      return false;
+    }
+    // Only ever for a room whose own scheduled slot has already ended (a true
+    // overrun). A mid-slot mismatch (override swap / zero-gap) keeps the old
+    // immediate-leave behavior.
+    if (nowMs < Date.parse(cur.endsAt)) {
+      this.overrunGraceActive = false;
+      return false;
+    }
+    if (!AdmiralEngine.OVERRUN_GRACE_ENABLED) {
+      this.overrunGraceActive = false;
+      return false;
+    }
+
+    const stillLive = this.participantSnapshot.scrapeOk
+      ? this.participantSnapshot.count >= AdmiralEngine.OVERRUN_GRACE_PARTICIPANTS
+      : true; // failed scrape = benefit of the doubt
+
+    if (!this.overrunGraceActive) {
+      // Don't enter a hold for a room that no longer looks live.
+      if (!stillLive) return false;
+      // Start the crossing hold.
+      this.overrunGraceActive = true;
+      this.overrunGraceSinceMs = nowMs;
+      this.overrunGraceSlotKey = this.sessionKey(cur);
+      this.overtimeActive = true;
+      this.overtimeSinceMs = nowMs;
+      this.overtimeSlotKey = this.sessionKey(cur);
+      this.belowThresholdSinceMs = null;
+      this.persistence.appendEvent({
+        kind: "overrun_grace_start",
+        slot: cur,
+        payload: {
+          nextSlot: this.activeSlot.startedAt,
+          nextClassName: this.activeSlot.className,
+          graceSeconds: AdmiralEngine.OVERRUN_GRACE_SECONDS,
+          overrunParticipantCount: this.participantSnapshot.scrapeOk
+            ? this.participantSnapshot.count
+            : null
+        }
+      });
+      this.center.enqueue({
+        kind: "overrun_grace",
+        slot: cur,
+        payload: {
+          nextSlot: this.activeSlot.startedAt,
+          nextClassName: this.activeSlot.className,
+          overrunParticipantCount: this.participantSnapshot.scrapeOk
+            ? this.participantSnapshot.count
+            : null,
+          overrunEndedAt: cur.endsAt,
+          graceSeconds: AdmiralEngine.OVERRUN_GRACE_SECONDS
+        }
+      });
+      return true;
+    }
+
+    // Already holding: continue only within the grace cap and while still live.
+    // A helper keeps this pure/reusable and unit-tested over other courses.
+    if (
+      !shouldContinueOverrunHold({
+        started: this.overrunGraceActive,
+        nowMs,
+        sinceMs: this.overrunGraceSinceMs,
+        graceMs: AdmiralEngine.OVERRUN_GRACE_MS,
+        stillLive
+      })
+    ) {
+      this.overrunGraceActive = false;
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -1088,7 +1242,10 @@ export class AdmiralEngine {
     // (a2) A scheduled-room occupancy that no longer matches the active slot
     // (back-to-back / zero-gap slots, an override swap, or a new class starting
     // during overtime) must leave so the normal join logic picks up the correct
-    // current slot. Adopted rooms are handled by (a) above.
+    // current slot. Adopted rooms are handled by (a) above. EXCEPTION: if the
+    // current room is an overrunning class still clearly live, the
+    // overrun-crossing grace keeps us here (bounded) to catch late attendance
+    // before switching — see shouldHoldOverrunCrossing.
     if (
       this.state === "InRoom" &&
       this.adoptedFromSlotKey == null &&
@@ -1096,20 +1253,27 @@ export class AdmiralEngine {
       this.activeSlot != null &&
       this.sessionKey(this.activeSlot) !== this.sessionKey(this.currentRoomSlot)
     ) {
-      this.persistence.appendEvent({
-        kind: "leave_success",
-        slot: this.currentRoomSlot,
-        payload: {
-          trigger: "Next class starting",
-          ...(this.overtimeActive ? { overtimeEndCause: "next_slot" } : {})
-        }
-      });
-      await this.performLeave();
-      this.state = "Out";
-      this.reason = "Next class starting";
-      this.resetRoomPresence();
-      this.persistControlState();
-      this.emitStatus();
+      const holding = this.shouldHoldOverrunCrossing(Date.now());
+      if (holding) {
+        // Still covering the overrun — the next-class join happens once the
+        // grace ends (this branch then lets the leave run below).
+      } else {
+        const wasHolding = this.overrunGraceActive || this.overtimeActive;
+        this.persistence.appendEvent({
+          kind: "leave_success",
+          slot: this.currentRoomSlot,
+          payload: {
+            trigger: "Next class starting",
+            ...(wasHolding ? { overtimeEndCause: "next_slot" } : {})
+          }
+        });
+        await this.performLeave();
+        this.state = "Out";
+        this.reason = "Next class starting";
+        this.resetRoomPresence();
+        this.persistControlState();
+        this.emitStatus();
+      }
     }
 
     // (b) Drop the re-sweep timer once its origin slot has passed.

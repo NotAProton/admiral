@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeOvertimeHold, type OvertimeConfig } from "./overtime.js";
+import { computeOvertimeHold, shouldContinueOverrunHold, type OvertimeConfig } from "./overtime.js";
 import type { ActiveSlot, ParticipantSnapshot } from "../shared/types.js";
 
 /**
@@ -107,4 +107,41 @@ test("resets the empty streak once the room repopulates", () => {
   const d = computeOvertimeHold(base({ snapshot: snap(8), belowStreak: 2 }));
   assert.equal(d.hold, true);
   assert.equal(d.belowStreak, 0);
+});
+
+// ── Overrun crossing hold (next class started while room still live) ──────
+
+test("overrun crossing: a not-yet-started hold never continues", () => {
+  assert.equal(
+    shouldContinueOverrunHold({ started: false, nowMs: 1000, sinceMs: 0, graceMs: 600_000, stillLive: true }),
+    false
+  );
+});
+
+test("overrun crossing: continues while the room is live and within the grace cap", () => {
+  assert.equal(
+    shouldContinueOverrunHold({ started: true, nowMs: 60_000, sinceMs: 0, graceMs: 600_000, stillLive: true }),
+    true
+  );
+});
+
+test("overrun crossing: stops once the grace cap is reached (10 min)", () => {
+  assert.equal(
+    shouldContinueOverrunHold({ started: true, nowMs: 600_001, sinceMs: 0, graceMs: 600_000, stillLive: true }),
+    false
+  );
+});
+
+test("overrun crossing: boundary at exactly the cap still holds (inclusive)", () => {
+  assert.equal(
+    shouldContinueOverrunHold({ started: true, nowMs: 600_000, sinceMs: 0, graceMs: 600_000, stillLive: true }),
+    true
+  );
+});
+
+test("overrun crossing: stops the moment the overrun room empties", () => {
+  assert.equal(
+    shouldContinueOverrunHold({ started: true, nowMs: 60_000, sinceMs: 0, graceMs: 600_000, stillLive: false }),
+    false
+  );
 });

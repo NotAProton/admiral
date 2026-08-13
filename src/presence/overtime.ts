@@ -87,3 +87,30 @@ export function computeOvertimeHold(params: {
 
   return { hold: true, belowStreak: 0, endCause: null };
 }
+
+/**
+ * ── Overrun crossing hold (pure continuation check) ────────────────────────
+ *
+ * When the *next* scheduled class starts while the current room is still
+ * clearly live (the teacher is running over into the next slot — the
+ * 2026-08-12 IOE411 absence), the engine holds the overrunning room instead of
+ * abandoning it instantly. This pure helper decides whether an *already-started*
+ * crossing hold should continue for this tick: only while the room is still
+ * "live" (headcount >= the overrun threshold) and within the grace cap
+ * (`sinceMs + graceMs`). Start/stop and the transition side effects (event +
+ * email) live in the engine; this keeps the continuation rule testable.
+ */
+export function shouldContinueOverrunHold(params: {
+  /** The crossing hold has transitioned to active and recorded `sinceMs`. */
+  started: boolean;
+  nowMs: number;
+  sinceMs: number;
+  graceMs: number;
+  /** Room still looks like a live class (headcount >= overrun threshold). */
+  stillLive: boolean;
+}): boolean {
+  if (!params.started) return false;
+  if (params.nowMs > params.sinceMs + params.graceMs) return false;
+  if (!params.stillLive) return false;
+  return true;
+}

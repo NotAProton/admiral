@@ -24,7 +24,10 @@ import {
 // outbox, coalesced (a join -> handoff -> rejoin flap inside the settle
 // window becomes one email), budget-gated against Resend's 100/day and
 // 3000/month limits (counted in IST days), and retried with backoff.
-// Per-session caps survive worker restarts via the email_dedupe ledger.
+// Marked per-session milestones (cover_start, summary, overtime_hold, etc.)
+// still fire at most once per session via the email_dedupe ledger, but the
+// repeated-milestone kinds (cover_resume, handoff) are no longer capped per
+// session — every real occurrence gets its own email.
 //
 
 export type NotificationKind =
@@ -37,7 +40,9 @@ export type NotificationKind =
   | "standdown"
   | "session_standdown"
   | "morning_plan"
-  | "daily_wrapup";
+  | "daily_wrapup"
+  | "overtime_hold"
+  | "overrun_grace";
 
 export type NotificationIntent = {
   kind: NotificationKind;
@@ -53,8 +58,6 @@ type Caps = {
   settleMs: number;
   ackSettleMs: number;
   maxAttempts: number;
-  resumeCap: number;
-  handoffCap: number;
   flushBatch: number;
   morningHour: number;
   morningMinute: number;
@@ -65,15 +68,13 @@ type Caps = {
 };
 
 const DEFAULT_CAPS: Caps = {
-  hardDaily: Number(process.env.EMAIL_DAILY_CAP ?? 85),
-  hardMonthly: Number(process.env.EMAIL_MONTHLY_CAP ?? 2800),
-  p1Daily: Number(process.env.EMAIL_P1_DAILY_CAP ?? 60),
-  p2Daily: Number(process.env.EMAIL_P2_DAILY_CAP ?? 40),
+  hardDaily: Number(process.env.EMAIL_DAILY_CAP ?? 100),
+  hardMonthly: Number(process.env.EMAIL_MONTHLY_CAP ?? 3000),
+  p1Daily: Number(process.env.EMAIL_P1_DAILY_CAP ?? 80),
+  p2Daily: Number(process.env.EMAIL_P2_DAILY_CAP ?? 60),
   settleMs: Number(process.env.EMAIL_SETTLE_SECONDS ?? 120) * 1000,
   ackSettleMs: 60 * 1000,
   maxAttempts: 5,
-  resumeCap: 2,
-  handoffCap: 2,
   flushBatch: 12,
   morningHour: Number(process.env.EMAIL_MORNING_PLAN_HOUR ?? 8),
   morningMinute: Number(process.env.EMAIL_MORNING_PLAN_MINUTE ?? 30),
@@ -262,25 +263,17 @@ export class NotificationCenter {
       "action_needed",
       "session_summary",
       "morning_plan",
-      "daily_wrapup"
+      "daily_wrapup",
+      "overtime_hold",
+      "overrun_grace"
     ]);
     if (single.has(kind)) {
       return this.p.dedupeExists(dedupeKey) || this.p.pendingOutboxExists(dedupeKey);
     }
-    if (kind === "cover_resume" && slotKey) {
-      const prefix = `cover_resume:${slotKey}:`;
-      return (
-        this.p.countDedupeByPrefix(prefix) + this.p.countPendingOutboxByPrefix(prefix) >=
-        this.caps.resumeCap
-      );
-    }
-    if (kind === "handoff" && slotKey) {
-      const prefix = `handoff:${slotKey}:`;
-      return (
-        this.p.countDedupeByPrefix(prefix) + this.p.countPendingOutboxByPrefix(prefix) >=
-        this.caps.handoffCap
-      );
-    }
+    // cover_resume and handoff carry a monotonically-indexed dedupe key per real
+    // occurrence (kind:slotKey:N), so they are never suppressed here — every
+    // occurrence sends. (They still fold together if they happen inside the
+    // coalesce settle window.)
     return false;
   }
 
@@ -411,6 +404,10 @@ export class NotificationCenter {
         return renderMorningPlan(this.statusProvider(), nowMs);
       case "daily_wrapup":
         return renderDailyWrapup(this.statusProvider(), nowMs);
+      case "overtime_hold":
+        return renderOvertimeHold(slot, row.payload, nowMs);
+      case "overrun_grace":
+        return renderOverrunGrace(slot, row.payload, nowMs);
       default:
         return { subject: "Admiral notification", lines: ["(unknown notification kind)"] };
     }
@@ -503,6 +500,18 @@ function specForKind(
       return { priority: 2, settleMs: 0, dedupeKey: `morning:${istDateKey(nowMs)}` };
     case "daily_wrapup":
       return { priority: 2, settleMs: 0, dedupeKey: `wrapup:${istDateKey(nowMs)}` };
+    case "overtime_hold":
+      return {
+        priority: 1,
+        settleMs: caps.ackSettleMs,
+        dedupeKey: slotKey ? `overtime_hold:${slotKey}` : null
+      };
+    case "overrun_grace":
+      return {
+        priority: 1,
+        settleMs: caps.ackSettleMs,
+        dedupeKey: slotKey ? `overrun_grace:${slotKey}` : null
+      };
     default:
       return { priority: 2, settleMs: 0, dedupeKey: null };
   }
@@ -588,6 +597,48 @@ function renderHandoff(slot: ActiveSlot | null, nowMs: number) {
   const lines = ["Admiral detected you in the room and has left. You have control.", ""];
   if (slot) lines.push(...slotLines(slot, nowMs));
   return { subject: `You're in — Admiral left (${slot?.className ?? "class"})`, lines };
+}
+
+function renderOvertimeHold(slot: ActiveSlot | null, payload: Record<string, unknown>, nowMs: number) {
+  const capSeconds = Number(payload.capSeconds) > 0 ? Number(payload.capSeconds) : 600;
+  const participants =
+    payload.participantCount === null || payload.participantCount === undefined
+      ? null
+      : Number(payload.participantCount);
+  const lines = [
+    `${slot?.className ?? "The class"} is running over its scheduled end — Admiral is holding your seat for up to ${Math.round(capSeconds / 60)} min so late attendance still sees you present.`,
+    ""
+  ];
+  if (slot) lines.push(...slotLines(slot, nowMs));
+  if (participants != null && Number.isFinite(participants)) {
+    lines.push("", `People in the room right now: ${participants}.`);
+  }
+  lines.push("", "Admiral leaves early if the room empties, you join, or a new class starts.");
+  return { subject: `Class running over — holding (${slot?.className ?? "class"})`, lines };
+}
+
+function renderOverrunGrace(slot: ActiveSlot | null, payload: Record<string, unknown>, nowMs: number) {
+  const participants =
+    typeof payload.overrunParticipantCount === "number" && Number.isFinite(payload.overrunParticipantCount)
+      ? payload.overrunParticipantCount
+      : null;
+  const nextClassName = typeof payload.nextClassName === "string" ? payload.nextClassName : null;
+  const graceSeconds = Number(payload.graceSeconds) > 0 ? Number(payload.graceSeconds) : 600;
+  const graceMinutes = Math.round(graceSeconds / 60);
+  const lines = [
+    `${slot?.className ?? "The previous class"} is STILL LIVE past its scheduled end (${
+      participants != null ? `${participants} people` : "people still present"
+    }), but the next class (${nextClassName ?? "the next scheduled class"}) has started.`,
+    "",
+    `Admiral can only be in one room, so it is staying with the overrunning class for up to ${graceMinutes} min to catch its late attendance, then will switch to ${nextClassName ?? "the next class"}.`,
+    ""
+  ];
+  if (slot) lines.push(...slotLines(slot, nowMs));
+  lines.push(
+    "",
+    "If the next class takes attendance in its first minutes, you may want to join it yourself during this window."
+  );
+  return { subject: `Staying with overrunning class — ${slot?.className ?? "class"}`, lines };
 }
 
 function renderActionNeeded(slot: ActiveSlot | null, payload: Record<string, unknown>, nowMs: number) {

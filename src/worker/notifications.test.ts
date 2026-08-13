@@ -121,13 +121,22 @@ test("coalesced flap sends one email consuming all milestone dedupe keys", async
   assert.equal(sends.length, 1);
 });
 
-test("cover_resume is capped at 2 per session", async () => {
+test("cover_resume is not capped per session — every occurrence sends", async () => {
   const { center, sends } = makeCenter();
   for (let i = 0; i < 4; i += 1) {
     center.enqueue({ kind: "cover_resume", slot, payload: { slot } });
     await center.flushDue();
   }
-  assert.equal(sends.length, 2);
+  assert.equal(sends.length, 4, "each cover_resume occurrence sends its own email");
+});
+
+test("handoff is not capped per session — every occurrence sends", async () => {
+  const { center, sends } = makeCenter();
+  for (let i = 0; i < 3; i += 1) {
+    center.enqueue({ kind: "handoff", slot, payload: { slot } });
+    await center.flushDue();
+  }
+  assert.equal(sends.length, 3, "each handoff occurrence sends its own email");
 });
 
 test("P2 is blocked by p2Daily but P0 action_needed still sends", async () => {
@@ -284,5 +293,40 @@ test("every email body carries a status block and footer", async () => {
   assert.match(body, /STATUS/);
   assert.match(body, /Dashboard: https:\/\/admiral\.test/);
   assert.match(body, /Admiral · admiral\.test/);
+});
+
+test("overtime_hold emails once per session and explains the hold", async () => {
+  const { center, sends } = makeCenter();
+  center.enqueue({ kind: "overtime_hold", slot, payload: { participantCount: 10, capSeconds: 600 } });
+  center.enqueue({ kind: "overtime_hold", slot, payload: { participantCount: 10, capSeconds: 600 } });
+  await center.flushDue();
+  assert.equal(sends.length, 1, "second overtime_hold for the same slot is deduped");
+  assert.match(sends[0]!.subject, /running over/);
+  assert.match(sends[0]!.text, /10/);
+});
+
+test("overrun_grace emails once, naming the overrunning and the next class", async () => {
+  const { center, sends } = makeCenter();
+  const overrun: ActiveSlot = {
+    ...slot,
+    courseId: "ioe411",
+    className: "Blockchain & Crypto-Currencies",
+    startedAt: "2026-07-29T12:05:00+05:30",
+    endsAt: "2026-07-29T13:00:00+05:30"
+  };
+  const payload = {
+    nextSlot: slot.startedAt,
+    nextClassName: slot.className,
+    overrunParticipantCount: 10,
+    overrunEndedAt: overrun.endsAt,
+    graceSeconds: 600
+  };
+  center.enqueue({ kind: "overrun_grace", slot: overrun, payload });
+  center.enqueue({ kind: "overrun_grace", slot: overrun, payload });
+  await center.flushDue();
+  assert.equal(sends.length, 1, "second overrun_grace for the same overrun slot is deduped");
+  assert.match(sends[0]!.subject, /Staying with overrunning class/);
+  assert.match(sends[0]!.text, /Blockchain/);
+  assert.match(sends[0]!.text, /VAPT/, "names the next class being held off");
 });
 
