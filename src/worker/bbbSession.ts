@@ -120,14 +120,36 @@ export class BbbSession {
       return { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
     }
 
+    // Playwright's page.evaluate has no per-call timeout in this version. A
+    // frozen BBB tab must not wedge the worker tick indefinitely. Close the
+    // page when this deadline fires; the engine treats this as a failed scrape
+    // and follows its existing leave/rejoin safety path.
+    const page = this.page;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        void page.close({ runBeforeUnload: false, reason: "Participant scrape deadline" }).catch(() => undefined);
+        resolve(null);
+      }, 20_000);
+    });
+    try {
+      return await Promise.race([this.scrapeParticipantsOnPage(page, targetDisplayName), deadline]) ??
+        { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async scrapeParticipantsOnPage(page: Page, targetDisplayName: string): Promise<ParticipantSnapshot> {
+
     try {
       await this.openUserListPanel();
-      await this.page.waitForTimeout(1_000);
+      await page.waitForTimeout(1_000);
     } catch {
       return { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
     }
 
-    const details = await this.page
+    const details = await page
       .evaluate(() => {
         const usersCountNode = document.querySelector("[data-test-users-count]") as HTMLElement | null;
         const usersCountText = usersCountNode?.innerText?.trim() ?? "";
