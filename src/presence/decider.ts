@@ -82,7 +82,7 @@ export function decide(world: World): Decision {
   if (world.state === "Out") {
     const joinAllowedBySignals =
       world.hasActiveSlot &&
-      (world.heartbeatMissing || world.newSlotStarted) &&
+      world.heartbeatMissing &&
       !world.heartbeatFresh &&
       !world.duplicateConfirmed &&
       !world.joinBackoffActive &&
@@ -96,7 +96,7 @@ export function decide(world: World): Decision {
           ? "Manual force-join override"
           : world.newSlotStarted
             ? "New slot started; auto-joining"
-            : "Active slot with stale heartbeat",
+          : "Active slot; auto-joining",
         shouldAttemptJoin: true,
         shouldAttemptLeave: false
       };
@@ -110,7 +110,7 @@ export function decide(world: World): Decision {
           ? "Backing off after repeated join failures"
           : world.joinGraceActive
             ? "Holding off after handoff (user likely present)"
-            : "Heartbeat still fresh; holding off";
+            : "I'm-in-class pause active; holding off";
     }
 
     return {
@@ -187,4 +187,3 @@ export function decide(world: World): Decision {
     shouldAttemptLeave: false
   };
 }
-

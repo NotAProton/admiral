@@ -408,7 +408,7 @@
         <a class="pill" href="/today">Today</a>
         <a class="pill" href="/participant-stats">Participant stats</a>
         <span id="topbarState" class="topbar-state"><span class="state-dot"></span><span id="topbarStateText">--</span></span>
-        <div id="hbState" class="pill">Heartbeat: unknown</div>
+        <div id="hbState" class="pill">Dashboard connection: unknown</div>
       </div>
     </header>
 
@@ -486,6 +486,13 @@
           <span id="scheduleSourcePill">schedule: --</span>
           <span id="emailBudgetPill">emails: --</span>
           <span id="workerHealthPill">worker: --</span>
+          <span id="settingsPill">settings: --</span>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">I'm in class</div>
+          <p>Looking at this page does not stop Admiral. If you're attending yourself, pause auto-join for 30 minutes; tap again to extend or turn it off.</p>
+          <div class="row"><button id="attendingBtn" class="secondary">I'm in class — 30 min</button><span id="attendingState">Not active</span></div>
         </div>
 
         <details class="panel">

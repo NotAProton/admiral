@@ -162,13 +162,12 @@ test("Force join bypasses handoff re-join grace", () => {
   assert.equal(d.shouldAttemptJoin, true);
 });
 
-test("Out auto-joins a new slot even when heartbeat is fresh", () => {
+test("Out holds on a new slot while attending toggle is active", () => {
   const d = decide(baseWorld({
-    state: "Out", newSlotStarted: true, heartbeatFresh: false, heartbeatMissing: false
+    state: "Out", newSlotStarted: true, heartbeatFresh: true, heartbeatMissing: false
   }));
-  assert.equal(d.nextState, "Joining");
-  assert.equal(d.shouldAttemptJoin, true);
-  assert.equal(d.reason, "New slot started; auto-joining");
+  assert.equal(d.nextState, "Out");
+  assert.equal(d.shouldAttemptJoin, false);
 });
 
 test("Out holds off on new slot when session standdown is active", () => {
@@ -188,4 +187,3 @@ test("Out holds off on new slot when global standdown is active", () => {
   assert.equal(d.shouldAttemptJoin, false);
   assert.equal(d.reason, "Standdown enabled");
 });
-

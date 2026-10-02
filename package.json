@@ -4,14 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run typecheck && npm run test:unit",
     "test:unit": "node --import tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "poc:resolve": "tsx src/poc/resolveBbbLink.ts",
     "poc:join": "tsx src/poc/joinBbb.ts",
     "worker:start": "tsx src/worker/index.ts",
-    "api:start": "tsx src/api/index.ts",
-    "watchdog:once": "tsx scripts/watchdog-notify.ts"
+    "api:start": "tsx src/api/index.ts"
   },
   "keywords": [],
   "author": "",

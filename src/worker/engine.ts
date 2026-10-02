@@ -58,8 +58,8 @@ export class AdmiralEngine {
   private lastScrapeAtMs = 0;
   private bbbJoinUrl: string | null = null;
   private currentRoomSlot: ActiveSlot | null = null;
-  private lastActiveSlotForSummary: ActiveSlot | null = null;
   private center!: NotificationCenter;
+  private attendingUntilMs = 0;
 
   // Handoff re-join grace: after handing off to the user, block auto-rejoin
   // for this slot until the grace window expires. Stops the 90s flap loop.
@@ -150,6 +150,7 @@ export class AdmiralEngine {
   private sweepsThisSlot = 0;
   private sweepOriginSlotKey: string | null = null;
   private sweepHaltedForSlot = false;
+  private sweepStartedAtMs: number | null = null;
   private nextRoomSweepAtMs: number | null = null;
   private adoptedFromSlotKey: string | null = null;
   private adoptedFromClassName: string | null = null;
@@ -208,6 +209,7 @@ export class AdmiralEngine {
     this.handoffGraceUntilMs = persisted.handoffGraceUntilMs;
     this.handoffGraceSlotKey = persisted.handoffGraceSlotKey;
     this.lastActiveSlotKey = persisted.lastActiveSlotKey;
+    this.attendingUntilMs = this.persistence.getControlNumber("attending_until_ms");
 
     // A room marker surviving to boot means the previous process died while
     // in-room: the browser is gone, so reset to Out and record the recovery.
@@ -242,10 +244,7 @@ export class AdmiralEngine {
       }
     }
 
-    // Recover a session summary that may have been missed if the worker
-    // restarted right at a slot boundary, and seed slot-end tracking.
-    this.recoverMissedSummary();
-    this.lastActiveSlotForSummary = getActiveSlot(this.config, (d) => this.opsForDate(d));
+    // A missed summary is folded into the daily digest from durable events.
 
     // Boot-time housekeeping: prune stale outbox rows (a multi-hour outage
     // should not flush yesterday's morning plan) and old debug artifacts
@@ -301,6 +300,13 @@ export class AdmiralEngine {
 
   recordHeartbeat(deviceId: string): void {
     this.heartbeat.record(deviceId);
+    this.emitStatus();
+  }
+
+  setAttending(active: boolean): void {
+    this.attendingUntilMs = active ? Date.now() + 30 * 60_000 : 0;
+    this.persistence.setControlNumber("attending_until_ms", this.attendingUntilMs);
+    this.persistence.appendEvent({ kind: "attending_toggle", payload: { active, untilMs: this.attendingUntilMs } });
     this.emitStatus();
   }
 
@@ -449,9 +455,16 @@ export class AdmiralEngine {
       heartbeat: {
         fresh: heartbeatFresh,
         lastAgeSeconds: heartbeatAge,
+        attendingUntil: this.attendingUntilMs > Date.now() ? new Date(this.attendingUntilMs).toISOString() : null,
       },
 
       email: this.center.getBudgetSnapshot(),
+      settings: {
+        emptyGraceSeconds: AdmiralEngine.ROOM_EMPTY_GRACE_MS / 1000,
+        emptyConfirmSeconds: AdmiralEngine.ROOM_EMPTY_CONFIRM_MS / 1000,
+        sweepRetrySeconds: AdmiralEngine.ROOM_SWEEP_RETRY_MS / 1000,
+        emailDailyCap: this.center.getBudgetSnapshot().emailDailyCap
+      }
     };
   }
 
@@ -617,11 +630,9 @@ export class AdmiralEngine {
       // Clear handoff grace when the user's heartbeat is fresh (they're back
       // on the PWA, so the flap risk is gone) or when the grace slot has ended.
       if (this.handoffGraceSlotKey) {
-        const heartbeatAge = this.heartbeat.getNewestAgeSeconds();
-        const heartbeatFresh = heartbeatAge != null && heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
         const graceSlotEnded =
           !this.activeSlot || this.sessionKey(this.activeSlot) !== this.handoffGraceSlotKey;
-        if (heartbeatFresh || graceSlotEnded || Date.now() >= this.handoffGraceUntilMs) {
+        if (this.attendingUntilMs > Date.now() || graceSlotEnded || Date.now() >= this.handoffGraceUntilMs) {
           this.handoffGraceUntilMs = 0;
           this.handoffGraceSlotKey = null;
           this.persistControlState();
@@ -664,13 +675,10 @@ export class AdmiralEngine {
 
       // ── SENSE: build World snapshot ─────────────────────────────────
       const now = Date.now();
-      const heartbeatAge = this.heartbeat.getNewestAgeSeconds(now);
-      const heartbeatFresh =
-        heartbeatAge != null &&
-        heartbeatAge <= this.config.heartbeat.freshThresholdSeconds;
-      const heartbeatMissing =
-        heartbeatAge == null ||
-        heartbeatAge >= this.config.heartbeat.missingThresholdSeconds;
+      // Opening the dashboard is not a claim that the user is in class.
+      // Only the explicit, expiring "I'm in class" control holds auto-join.
+      const heartbeatFresh = this.attendingUntilMs > now;
+      const heartbeatMissing = !heartbeatFresh;
 
       // Detect slot transition: new class started.
       const currentSlotKey = this.activeSlot
@@ -704,7 +712,7 @@ export class AdmiralEngine {
         hasActiveSlot: this.activeSlot != null,
         overtimeHold,
         activeSlot: this.activeSlot,
-        heartbeatFresh: newSlotStarted ? false : heartbeatFresh,
+        heartbeatFresh,
         heartbeatMissing,
         newSlotStarted,
         duplicateConfirmed:
@@ -952,6 +960,12 @@ export class AdmiralEngine {
         this.roomSweepPending = true;
       }
     } else {
+      if (this.belowThresholdSinceMs != null && this.currentRoomSlot) {
+        const key = this.sessionKey(this.currentRoomSlot);
+        if (this.center.wasActionSent(key, "room_empty_everywhere")) {
+          this.center.enqueue({ kind: "room_recovered", slot: this.currentRoomSlot, payload: { count: snapshot.count } });
+        }
+      }
       this.belowThresholdSinceMs = null;
     }
   }
@@ -1437,6 +1451,9 @@ export class AdmiralEngine {
         slot,
         payload: opts?.rejoinReason ? { reason: opts.rejoinReason } : undefined
       });
+      if (this.center.wasActionSent(slotKey, "retries_exhausted")) {
+        this.center.enqueue({ kind: "join_recovered", slot });
+      }
 
       // Sweep-driven rejoins of the scheduled room skip the cover email: the
       // 15-min retry cycle would otherwise burn the per-session email caps.
@@ -1493,7 +1510,8 @@ export class AdmiralEngine {
           payload: {
             reason: "retries_exhausted",
             failureCount: AdmiralEngine.MAX_CONSECUTIVE_JOIN_FAILURES,
-            backoffMinutes
+            backoffMinutes,
+            error: message
           }
         });
       }
@@ -1673,6 +1691,7 @@ export class AdmiralEngine {
         this.emitStatus();
         return;
       }
+      this.sweepStartedAtMs = Date.now();
     }
     this.resetRoomPresence();
     this.persistControlState();
@@ -1965,6 +1984,8 @@ export class AdmiralEngine {
       });
       this.state = joined ? "InRoom" : "Out";
       if (joined) {
+        this.persistence.appendEvent({ kind: "room_sweep_return", slot: originSlot, payload: { awayMs: this.sweepStartedAtMs ? Date.now() - this.sweepStartedAtMs : null } });
+        this.sweepStartedAtMs = null;
         this.nextRoomSweepAtMs = Date.now() + AdmiralEngine.ROOM_SWEEP_RETRY_MS;
         this.reason =
           `${originSlot.className} is empty; sitting in it anyway — ` +
@@ -1990,8 +2011,7 @@ export class AdmiralEngine {
 
   /** True when the newest PWA heartbeat is within the fresh threshold. */
   private heartbeatFreshNow(): boolean {
-    const age = this.heartbeat.getNewestAgeSeconds();
-    return age != null && age <= this.config.heartbeat.freshThresholdSeconds;
+    return this.attendingUntilMs > Date.now();
   }
 
 
@@ -2002,21 +2022,11 @@ export class AdmiralEngine {
 
   /** Enqueues a session summary when the active slot changes or ends. */
   private detectSlotEndForSummary(): void {
-    const currentKey = this.activeSlot ? this.sessionKey(this.activeSlot) : null;
-    if (this.lastActiveSlotForSummary) {
-      const lastKey = this.sessionKey(this.lastActiveSlotForSummary);
-      if (lastKey !== currentKey) {
-        this.center.enqueue({ kind: "session_summary", slot: this.lastActiveSlotForSummary });
-      }
-    }
-    this.lastActiveSlotForSummary = this.activeSlot;
-  }
-
-  /** Recovers a missed summary if the worker restarted at a slot boundary. */
-  private recoverMissedSummary(): void {
+    // Wait until the room is actually left: overtime may continue past the
+    // scheduled end. The event history remains the source for daily digests.
     const recent = getMostRecentEndedSlot(this.config, (d) => this.opsForDate(d));
-    if (!recent) return;
-    if (this.center.wasSummarySent(this.sessionKey(recent))) return;
+    if (!recent || this.center.wasSummarySent(this.sessionKey(recent))) return;
+    if (this.currentRoomSlot && this.sessionKey(this.currentRoomSlot) === this.sessionKey(recent)) return;
     this.center.enqueue({ kind: "session_summary", slot: recent });
   }
 

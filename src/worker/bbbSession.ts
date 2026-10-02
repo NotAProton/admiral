@@ -42,6 +42,8 @@ export class BbbSession {
       });
 
       this.page = await this.context.newPage();
+      this.page.setDefaultTimeout(12_000);
+      this.page.setDefaultNavigationTimeout(60_000);
 
       await this.doJoinFlow(input);
     } catch (error) {
@@ -118,8 +120,12 @@ export class BbbSession {
       return { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
     }
 
-    await this.openUserListPanel();
-    await this.page.waitForTimeout(1_000);
+    try {
+      await this.openUserListPanel();
+      await this.page.waitForTimeout(1_000);
+    } catch {
+      return { count: 0, names: [], nameExactMatchCount: 0, scrapeOk: false };
+    }
 
     const details = await this.page
       .evaluate(() => {

@@ -213,7 +213,9 @@ export type StatusResponseV2 = {
   heartbeat: {
     fresh: boolean;
     lastAgeSeconds: number | null;
+    attendingUntil?: string | null;
   };
 
   email: EmailBudgetSnapshot | null;
+  settings?: { emptyGraceSeconds: number; emptyConfirmSeconds: number; sweepRetrySeconds: number; emailDailyCap: number };
 };

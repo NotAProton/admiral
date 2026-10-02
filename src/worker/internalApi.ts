@@ -47,7 +47,7 @@ function writeSse(reply: FastifyReply, event: string, payload: StatusResponse): 
 }
 
 export async function startInternalApi(engine: AdmiralEngine, port: number): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: { level: "warn" } });
 
   app.get("/internal/health", async (request, reply) => {
     const alive = engine.isAlive();
@@ -130,6 +130,12 @@ export async function startInternalApi(engine: AdmiralEngine, port: number): Pro
     return { ok: true };
   });
 
+  app.post("/internal/attending", async (request: FastifyRequest<{ Body: { active: boolean } }>) => {
+    const body = z.object({ active: z.boolean() }).parse(request.body);
+    engine.setAttending(body.active);
+    return { ok: true };
+  });
+
   app.post("/internal/override", async (request: FastifyRequest<{ Body: { action: OverrideAction } }>) => {
     const body = overrideSchema.parse(request.body);
     engine.applyOverride(body.action);
@@ -157,6 +163,6 @@ export async function startInternalApi(engine: AdmiralEngine, port: number): Pro
     return reply;
   });
 
-  await app.listen({ port, host: "127.0.0.1" });
+  await app.listen({ port, host: process.env.INTERNAL_API_HOST ?? "127.0.0.1" });
   return app;
 }

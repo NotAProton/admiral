@@ -174,6 +174,12 @@ export async function resolveJoinUrl(input: ResolveJoinInput): Promise<{ joinUrl
       await page.goto(input.classPageUrl, { waitUntil: "domcontentloaded" });
       log("goto_class_page_after_login_done", { finalUrl: page.url() });
     }
+    // Moodle can expire the session between the LMS landing and class page.
+    // Fail with a useful reason instead of searching for the join button on a
+    // login form; next attempt will start with a fresh browser/auth state.
+    if (page.url().includes("/login/index.php")) {
+      throw new Error("Moodle redirected the class page to login after authentication; check credentials/session availability");
+    }
 
     const joinTextRegex = new RegExp(escapeRegex(input.joinLinkText), "i");
     const popupPromise = context.waitForEvent("page", { timeout: 12_000 }).catch(() => null);

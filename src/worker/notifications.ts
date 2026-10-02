@@ -1,6 +1,5 @@
 import type {
   ActiveSlot,
-  DayName,
   EmailBudgetSnapshot,
   HistoryEvent,
   StatusResponse
@@ -42,7 +41,17 @@ export type NotificationKind =
   | "morning_plan"
   | "daily_wrapup"
   | "overtime_hold"
-  | "overrun_grace";
+  | "overrun_grace"
+  | "room_recovered"
+  | "join_recovered";
+
+const QUIET_KINDS: ReadonlySet<NotificationKind> = new Set([
+  "cover_start", "session_summary", "overtime_hold", "handoff", "morning_plan"
+]);
+
+// Quiet mode can be disabled temporarily when troubleshooting delivery. The
+// default is intentionally exception-first, not inbox-first.
+const QUIET_EMAIL_ENABLED = process.env.EMAIL_QUIET_MODE !== "false";
 
 export type NotificationIntent = {
   kind: NotificationKind;
@@ -128,6 +137,15 @@ export class NotificationCenter {
     const slotKey = intent.slot ? slotKeyFor(intent.slot) : null;
     let spec = specForKind(intent.kind, slotKey, intent.payload ?? {}, nowMs, this.caps);
 
+    // Keep milestones in history, not in the inbox. Consume their dedupe keys
+    // so restarts and the next tick don't re-enqueue them; cover_resume still
+    // knows whether this is the first coverage for a slot.
+    if (QUIET_EMAIL_ENABLED && QUIET_KINDS.has(intent.kind)) {
+      if (spec.dedupeKey && (this.p.dedupeExists(spec.dedupeKey) || this.p.pendingOutboxExists(spec.dedupeKey))) return;
+      if (spec.dedupeKey) this.p.recordDedupe(spec.dedupeKey, nowMs);
+      return;
+    }
+
     if (spec.supersedeKind) {
       this.p.cancelPendingByKind(spec.supersedeKind);
     }
@@ -141,17 +159,7 @@ export class NotificationCenter {
       spec = { ...spec, dedupeKey: `${prefix}${used + 1}` };
     }
 
-    if (spec.dedupeKey && this.capExceeded(intent.kind, spec.dedupeKey, slotKey)) {
-      this.p.appendEvent({
-        kind: "email_suppressed",
-        payload: {
-          emailKind: intent.kind,
-          dedupeKey: spec.dedupeKey,
-          reason: "per-session cap reached"
-        }
-      });
-      return;
-    }
+    if (spec.dedupeKey && this.capExceeded(intent.kind, spec.dedupeKey, slotKey)) return;
 
     this.p.enqueueOutbox({
       createdMs: nowMs,
@@ -171,6 +179,11 @@ export class NotificationCenter {
     );
   }
 
+  wasActionSent(slotKey: string, reason: string): boolean {
+    const key = `action_needed:${slotKey}:${reason}`;
+    return this.p.dedupeExists(key) || this.p.pendingOutboxExists(key);
+  }
+
   /** True once a session summary for this slot has been sent or is pending. */
   wasSummarySent(slotKey: string): boolean {
     return (
@@ -181,25 +194,17 @@ export class NotificationCenter {
 
   // ── Daily scheduled emails (morning plan + 4pm wrap-up) ───────────────────
 
-  /** Fires the morning plan and daily wrap-up by the IST clock. Call per tick. */
+  /** Fires one daily digest by the IST clock. Call per tick. */
   maybeFireScheduledDaily(): void {
     const nowMs = this.now();
     const { hour, minute } = istParts(nowMs);
     const dateKey = istDateKey(nowMs);
 
-    const morningReady =
-      (hour > this.caps.morningHour ||
-        (hour === this.caps.morningHour && minute >= this.caps.morningMinute)) &&
-      hour < this.caps.morningWindowEndHour;
-    if (morningReady && !this.p.dedupeExists(`morning:${dateKey}`)) {
-      this.enqueue({ kind: "morning_plan", payload: { istDate: dateKey } });
-    }
-
     const wrapupReady =
       (hour > this.caps.wrapupHour ||
         (hour === this.caps.wrapupHour && minute >= this.caps.wrapupMinute)) &&
       hour < this.caps.wrapupWindowEndHour;
-    if (wrapupReady && !this.p.dedupeExists(`wrapup:${dateKey}`)) {
+    if (wrapupReady && this.statusProvider().schedule.todaySlots.length > 0 && !this.p.dedupeExists(`wrapup:${dateKey}`)) {
       this.enqueue({ kind: "daily_wrapup", payload: { istDate: dateKey } });
     }
   }
@@ -210,7 +215,7 @@ export class NotificationCenter {
     return {
       emailsToday: this.p.countEmailsSince(dayStart),
       emailDailyCap: this.caps.hardDaily,
-      suppressedToday: this.p.countEventsByKindSince("email_suppressed", dayStart)
+      suppressedToday: this.p.countEmailSuppressionsSince(dayStart)
     };
   }
 
@@ -265,7 +270,8 @@ export class NotificationCenter {
       "morning_plan",
       "daily_wrapup",
       "overtime_hold",
-      "overrun_grace"
+      "overrun_grace",
+      "room_recovered"
     ]);
     if (single.has(kind)) {
       return this.p.dedupeExists(dedupeKey) || this.p.pendingOutboxExists(dedupeKey);
@@ -403,11 +409,15 @@ export class NotificationCenter {
       case "morning_plan":
         return renderMorningPlan(this.statusProvider(), nowMs);
       case "daily_wrapup":
-        return renderDailyWrapup(this.statusProvider(), nowMs);
+        return renderDailyWrapup(this.p, this.statusProvider(), nowMs);
       case "overtime_hold":
         return renderOvertimeHold(slot, row.payload, nowMs);
       case "overrun_grace":
         return renderOverrunGrace(slot, row.payload, nowMs);
+      case "room_recovered":
+        return { subject: `Room filled up — ${slot?.className ?? "class"}`, lines: [`Earlier empty-room alert resolved. Admiral is back in the scheduled room, which now has ${row.payload.count ?? "several"} participants. No action needed.`] };
+      case "join_recovered":
+        return { subject: `Admiral joined again — ${slot?.className ?? "class"}`, lines: ["Earlier join-failure alert resolved. Admiral is now in the scheduled room. No action needed."] };
       default:
         return { subject: "Admiral notification", lines: ["(unknown notification kind)"] };
     }
@@ -512,6 +522,10 @@ function specForKind(
         settleMs: caps.ackSettleMs,
         dedupeKey: slotKey ? `overrun_grace:${slotKey}` : null
       };
+    case "room_recovered":
+      return { priority: 1, settleMs: 0, dedupeKey: slotKey ? `room_recovered:${slotKey}` : null };
+    case "join_recovered":
+      return { priority: 1, settleMs: 0, dedupeKey: slotKey ? `join_recovered:${slotKey}` : null };
     default:
       return { priority: 2, settleMs: 0, dedupeKey: null };
   }
@@ -685,7 +699,7 @@ function renderActionNeeded(slot: ActiveSlot | null, payload: Record<string, unk
   const failureCount = Number(payload.failureCount ?? 0);
   const backoffMinutes = Number(payload.backoffMinutes ?? 0);
   const lines = [
-    `Admiral cannot join this class right now (${reason}).`,
+    `Admiral cannot join this class right now (${reason}).${typeof payload.error === "string" ? ` Last error: ${payload.error}` : ""}`,
     "",
     failureCount > 0
       ? `${failureCount} consecutive join failures — backing off ${backoffMinutes} min.`
@@ -854,19 +868,6 @@ function slotBrief(slot: ActiveSlot): string {
   return `Class:  ${slot.className}\nCourse: ${slot.courseId}\nSlot:   ${shortIstTime(slot.startedAt)} – ${shortIstTime(slot.endsAt)} (${slotDurationMinutes(slot)} min)`;
 }
 
-function todaySlots(status: StatusResponse, nowMs: number): { time: string; label: string }[] {
-  const weekday = istParts(nowMs).weekday as DayName;
-  const out: { time: string; label: string }[] = [];
-  for (const course of status.schedule.config.courses) {
-    for (const ws of course.weeklySlots) {
-      if (!ws.days.includes(weekday)) continue;
-      out.push({ time: `${ws.start}–${ws.end}`, label: `${course.className} (${course.courseId})` });
-    }
-  }
-  out.sort((a, b) => a.time.localeCompare(b.time));
-  return out;
-}
-
 function renderMorningPlan(status: StatusResponse, nowMs: number) {
   const date = istDateKey(nowMs);
   const lines = [
@@ -877,7 +878,7 @@ function renderMorningPlan(status: StatusResponse, nowMs: number) {
     "",
     "Today's classes:"
   ];
-  const slots = todaySlots(status, nowMs);
+  const slots = status.schedule.todaySlots.map((s) => ({ time: `${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)}`, label: `${s.className} (${s.courseId})` }));
   if (slots.length === 0) lines.push("  (none scheduled today)");
   for (const s of slots) lines.push(`  • ${s.time}  ${s.label}`);
   if (status.schedule.upcomingSlot) {
@@ -890,20 +891,42 @@ function renderMorningPlan(status: StatusResponse, nowMs: number) {
   return { subject: `Admiral morning plan — ${date}`, lines };
 }
 
-function renderDailyWrapup(status: StatusResponse, nowMs: number) {
+export function renderDailyWrapup(p: WorkerPersistence, status: StatusResponse, nowMs: number) {
   const date = istDateKey(nowMs);
   const budget = status.email;
+  const events = p.listEventsBetween(istDayStartMs(nowMs), nowMs + 1);
   const lines = [
     `Admiral daily wrap-up — ${date}`,
     "",
-    `Today's email activity: ${budget?.emailsToday ?? 0} sent / ${budget?.emailDailyCap ?? 0} daily cap, ${budget?.suppressedToday ?? 0} suppressed.`,
+    `Emails: ${budget?.emailsToday ?? 0} sent / ${budget?.emailDailyCap ?? 0} daily cap; ${budget?.suppressedToday ?? 0} delivery/budget suppressed (duplicate notices excluded).`,
     `Standdown: ${status.suppressions.globalStanddown ? "ON" : "off"}`,
     "",
-    "Today's classes:"
+    "Today's coverage (room time, not proof of attendance):"
   ];
-  const slots = todaySlots(status, nowMs);
-  if (slots.length === 0) lines.push("  (none scheduled today)");
-  for (const s of slots) lines.push(`  • ${s.time}  ${s.label}`);
+  if (status.schedule.todaySlots.length === 0) lines.push("  (none scheduled today)");
+  for (const s of status.schedule.todaySlots) {
+    const key = slotKeyFor(s);
+    const own = events.filter((e) => e.slotKey === key);
+    const joins = own.filter((e) => e.kind === "join_success" && !e.payload?.dryRun);
+    const leaves = own.filter((e) => e.kind === "leave_success");
+    const failures = own.filter((e) => e.kind === "join_failure").length;
+    const sweeps = own.filter((e) => e.kind === "room_sweep_start").length;
+    const awayMs = own.filter((e) => e.kind === "room_sweep_return").reduce((n, e) => n + (typeof e.payload?.awayMs === "number" ? e.payload.awayMs : 0), 0);
+    const overtime = own.some((e) => e.kind === "overtime_hold_start");
+    const alerts = own.filter((e) => e.kind === "room_sweep_exhausted").length;
+    const start = Date.parse(s.startedAt), end = Date.parse(s.endsAt);
+    const overtimeMs = overtime ? Math.max(0, (leaves.at(-1)?.tsMs ?? nowMs) - end) : 0;
+    const handoffs = leaves.filter((e) => String(e.payload?.trigger ?? "").includes("Duplicate")).length;
+    let coveredMs = 0;
+    for (const [i, join] of joins.entries()) {
+      const nextJoin = joins[i + 1]?.tsMs ?? Infinity;
+      const leave = leaves.find((e) => e.tsMs > join.tsMs && e.tsMs < nextJoin);
+      const nextSweep = own.find((e) => e.kind === "room_sweep_start" && e.tsMs > join.tsMs && e.tsMs < nextJoin);
+      coveredMs += Math.max(0, Math.min(leave?.tsMs ?? nextSweep?.tsMs ?? nowMs, end) - Math.max(join.tsMs, start));
+    }
+    const duration = Math.max(1, Math.round((end - start) / 60_000));
+    lines.push(`  • ${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)} ${s.className}: Admiral in scheduled room ~${Math.round(coveredMs / 60_000)}/${duration} min${joins.length ? `; joined ${shortIstTime(joins[0]!.tsMs)}; last left ${leaves.length ? shortIstTime(leaves.at(-1)!.tsMs) : "still covering"}` : "; did not join"}${handoffs ? `; ${handoffs} handoff(s)` : ""}${overtime ? `; held ~${Math.round(overtimeMs / 60_000)} min overtime` : ""}${sweeps ? `; ${sweeps} sweeps (~${Math.round(awayMs / 60_000)} min away)` : ""}${failures ? `; ${failures} join failures` : ""}${alerts ? `; empty-room alerts: ${alerts}` : ""}.`);
+  }
   if (status.schedule.upcomingSlot) {
     lines.push("", `Next class: ${status.schedule.upcomingSlot.className} at ${shortIstTime(status.schedule.upcomingSlot.startedAt)}`);
   }
@@ -939,4 +962,3 @@ function footer(): string {
   const domain = process.env.ADMIRAL_DOMAIN ?? "admiral";
   return `\n-- \nAdmiral · ${domain}`;
 }
-

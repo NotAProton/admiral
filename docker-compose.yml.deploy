@@ -1,9 +1,11 @@
 services:
   worker:
-    image: ghcr.io/notaproton/admiral-worker:latest
-    pull_policy: always
+    image: ghcr.io/notaproton/admiral-worker:${ADMIRAL_TAG:-latest}
+    pull_policy: missing
     env_file:
       - .env
+    environment:
+      INTERNAL_API_HOST: 0.0.0.0
     volumes:
       - admiral_data:/app/data
     restart: unless-stopped
@@ -28,17 +30,30 @@ services:
       start_period: 60s
 
   api:
-    image: ghcr.io/notaproton/admiral-api:latest
-    pull_policy: always
+    image: ghcr.io/notaproton/admiral-api:${ADMIRAL_TAG:-latest}
+    pull_policy: missing
     env_file:
       - .env
+    environment:
+      WORKER_INTERNAL_URL: http://worker:8787
     depends_on:
       worker:
         condition: service_healthy
-    network_mode: service:worker
     restart: unless-stopped
     labels:
       autoheal: "true"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     logging:
       driver: json-file
       options:
@@ -46,7 +61,7 @@ services:
         max-file: "3"
 
   autoheal:
-    image: willfarrell/autoheal:latest
+    image: willfarrell/autoheal@sha256:d98a2df2602512b4bee8eb8ea5a74fa2fdd7473759aef0090477be47376d490a
     environment:
       AUTOHEAL_CONTAINER_LABEL: autoheal
     volumes:
@@ -61,7 +76,7 @@ services:
   caddy:
     image: caddy:2
     depends_on:
-      - worker
+      - api
     env_file:
       - .env
     ports:

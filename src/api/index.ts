@@ -19,9 +19,10 @@ function tokensMatch(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: { level: "warn" } });
 
 const internalPort = Number(process.env.INTERNAL_API_PORT ?? 8787);
+const workerUrl = process.env.WORKER_INTERNAL_URL ?? `http://127.0.0.1:${internalPort}`;
 const publicPort = Number(process.env.PUBLIC_API_PORT ?? 8080);
 const accessToken = process.env.ADMIRAL_ACCESS_TOKEN ?? "";
 const sessionSecret = process.env.SESSION_SECRET ?? "change-me";
@@ -59,7 +60,7 @@ function clearLoginFailures(ip: string): void {
 }
 
 // Defense-in-depth: check Origin/Referer matches our domain on state-changing routes.
-const mutatingPaths = new Set(["/login", "/override", "/heartbeat", "/logout", "/day-override", "/day-override-delete"]);
+const mutatingPaths = new Set(["/login", "/override", "/heartbeat", "/attending", "/logout", "/day-override", "/day-override-delete"]);
 const allowedHost = process.env.ADMIRAL_DOMAIN ?? "";
 
 function originAllowed(request: { headers: Record<string, string | string[] | undefined>; ip: string }): boolean {
@@ -101,9 +102,13 @@ const publicFiles: Record<string, string> = {
   "/sw.js": resolve("web/sw.js")
 };
 
+// Keep the healthcheck independent of the worker so autoheal can restart this
+// container after a worker replacement even when the worker is healthy.
+app.get("/livez", async () => ({ ok: true, service: "api" }));
+
 app.addHook("onRequest", async (request, reply) => {
   const path = request.url.split("?")[0] ?? "/";
-  const isPublicRoute = path in publicFiles || path === "/login" || path === "/health" || path === "/logout";
+  const isPublicRoute = path in publicFiles || path === "/login" || path === "/health" || path === "/livez" || path === "/logout";
   if (isPublicRoute) return;
 
   const authOk = isAuthenticated(request.headers.cookie, sessionSecret);
@@ -161,7 +166,7 @@ app.get("/health", async (request, reply) => {
   // the engine has stopped ticking (e.g. a hung tick), which Docker's
   // healthcheck / autoheal can use to restart a wedged container.
   try {
-    const res = await fetch(`http://127.0.0.1:${internalPort}/internal/health`, {
+    const res = await fetch(`${workerUrl}/internal/health`, {
       signal: AbortSignal.timeout(5_000)
     });
     const body = await res.json().catch(() => ({ ok: false, service: "worker", ts: new Date().toISOString() }));
@@ -172,7 +177,7 @@ app.get("/health", async (request, reply) => {
 });
 
 app.get("/status", async () => {
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/status`, {
+  const res = await fetch(`${workerUrl}/internal/status`, {
     signal: AbortSignal.timeout(5_000)
   });
   return res.json();
@@ -181,7 +186,7 @@ app.get("/status", async () => {
 app.get("/history", async (request) => {
   const queryIndex = request.url.indexOf("?");
   const query = queryIndex >= 0 ? request.url.slice(queryIndex) : "";
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/history${query}`, {
+  const res = await fetch(`${workerUrl}/internal/history${query}`, {
     signal: AbortSignal.timeout(5_000)
   });
   return res.json();
@@ -190,7 +195,7 @@ app.get("/history", async (request) => {
 app.get("/participant-samples", async (request) => {
   const queryIndex = request.url.indexOf("?");
   const query = queryIndex >= 0 ? request.url.slice(queryIndex) : "";
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/participant-samples${query}`, {
+  const res = await fetch(`${workerUrl}/internal/participant-samples${query}`, {
     signal: AbortSignal.timeout(5_000)
   });
   return res.json();
@@ -204,7 +209,7 @@ app.get("/day-overrides", async (request, reply) => {
       dayOverrideSchema.pick({ date: true }).parse({ date });
     }
     const querySuffix = date ? `?date=${encodeURIComponent(date)}` : "";
-    const res = await fetch(`http://127.0.0.1:${internalPort}/internal/day-overrides${querySuffix}`, {
+    const res = await fetch(`${workerUrl}/internal/day-overrides${querySuffix}`, {
       signal: AbortSignal.timeout(5_000)
     });
     if (!res.ok) {
@@ -220,7 +225,7 @@ app.get("/day-overrides", async (request, reply) => {
 
 app.post("/heartbeat", async (request, reply) => {
   const body = heartbeatSchema.parse(request.body);
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/heartbeat`, {
+  const res = await fetch(`${workerUrl}/internal/heartbeat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -234,9 +239,18 @@ app.post("/heartbeat", async (request, reply) => {
   return { ok: true };
 });
 
+app.post("/attending", async (request, reply) => {
+  const body = z.object({ active: z.boolean() }).parse(request.body);
+  const res = await fetch(`${workerUrl}/internal/attending`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(5_000)
+  });
+  return reply.code(res.ok ? 200 : 502).send({ ok: res.ok });
+});
+
 app.post("/override", async (request, reply) => {
   const body = overrideSchema.parse(request.body);
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/override`, {
+  const res = await fetch(`${workerUrl}/internal/override`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -252,7 +266,7 @@ app.post("/override", async (request, reply) => {
 
 app.post("/day-override", async (request, reply) => {
   const body = dayOverrideSchema.parse(request.body);
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/day-override`, {
+  const res = await fetch(`${workerUrl}/internal/day-override`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -269,7 +283,7 @@ app.post("/day-override", async (request, reply) => {
 
 app.post("/day-override-delete", async (request, reply) => {
   const body = dayOverrideDeleteSchema.parse(request.body);
-  const res = await fetch(`http://127.0.0.1:${internalPort}/internal/day-override-delete`, {
+  const res = await fetch(`${workerUrl}/internal/day-override-delete`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -293,7 +307,7 @@ app.get("/events", async (request, reply) => {
 
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${internalPort}/internal/events`, {
+    res = await fetch(`${workerUrl}/internal/events`, {
       signal: abortController.signal
     });
   } catch (error) {

@@ -84,6 +84,27 @@ function lockUi() {
 function unlockUi() {
   loginCard.classList.add("hidden");
   appCard.classList.remove("hidden");
+  for (const button of appCard.querySelectorAll("button")) button.disabled = false;
+}
+
+function cacheStatus(status) {
+  // Never persist BBB join URLs, participant names, or LMS course URLs on the
+  // phone. Offline status is read-only and deliberately less detailed.
+  try {
+    const safe = structuredClone(status);
+    if (safe.presence) {
+      safe.presence.bbbJoinUrl = null;
+      safe.presence.participantNames = [];
+    }
+    if (safe.schedule) {
+      safe.schedule.config = { ...safe.schedule.config, courses: [] };
+      safe.schedule.url = null;
+      for (const slot of [safe.schedule.activeSlot, safe.schedule.upcomingSlot, ...(safe.schedule.todaySlots || [])]) {
+        if (slot) { slot.classPageUrl = ""; slot.myDisplayName = ""; }
+      }
+    }
+    localStorage.setItem("admiral_last_status", JSON.stringify(safe));
+  } catch { /* storage unavailable */ }
 }
 
 // ── Countdown rendering (no network, uses cached status) ──────────────────
@@ -170,7 +191,7 @@ function renderStatus(status) {
 
   const age = status.heartbeat?.lastAgeSeconds;
   const fresh = status.heartbeat?.fresh;
-  hbState.textContent = age == null ? "Heartbeat: none yet" : `Heartbeat: ${age}s ago`;
+  hbState.textContent = age == null ? "Dashboard connection: none yet" : `Dashboard connection: ${age}s ago`;
   hbState.className = `pill ${fresh ? "ok" : "warn"}`;
 
   // State summary card — stripe + colored value word + dot inherits color
@@ -260,7 +281,7 @@ function renderStatus(status) {
   if (emailPill) {
     if (status.email) {
       emailPill.textContent = `emails: ${status.email.emailsToday}/${status.email.emailDailyCap}` +
-        (status.email.suppressedToday > 0 ? ` (${status.email.suppressedToday} muted)` : "");
+        (status.email.suppressedToday > 0 ? ` (${status.email.suppressedToday} delivery/budget suppressed)` : "");
     } else {
       emailPill.textContent = "emails: —";
     }
@@ -282,14 +303,18 @@ function renderStatus(status) {
   const workerHealthEl = document.getElementById("workerHealthPill");
   if (workerHealthEl) {
     const age = status.heartbeat?.lastAgeSeconds;
-    const hbStale = age == null || age > 120;
     const backoffActive = status.suppressions?.joinBackoffActive ?? false;
-    let health = "ok";
-    if (hbStale) health = "heartbeat stale";
-    else if (backoffActive) health = "backoff";
+    let health = backoffActive ? "join backoff" : "ok";
     workerHealthEl.textContent = `worker: ${health}`;
     workerHealthEl.style.color = health === "ok" ? "" : "var(--warn)";
   }
+  const settings = status.settings;
+  const settingsPill = document.getElementById("settingsPill");
+  if (settingsPill && settings) settingsPill.textContent = `sweep: ${settings.emptyGraceSeconds}+${settings.emptyConfirmSeconds}s / retry ${settings.sweepRetrySeconds}s · email cap: ${settings.emailDailyCap}`;
+  const attending = status.heartbeat?.attendingUntil;
+  const attendingBtn = document.getElementById("attendingBtn");
+  document.getElementById("attendingState").textContent = attending ? `Active until ${new Date(attending).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" })} IST` : "Not active";
+  attendingBtn.textContent = attending ? "Turn off / Renew 30 min" : "I'm in class — 30 min";
 
   // Current room pill
   const roomPill = document.getElementById("currentRoomPill");
@@ -350,8 +375,20 @@ async function refreshStatus() {
     const status = await request("/status", { method: "GET", headers: {} });
     unlockUi();
     renderStatus(status);
+    cacheStatus(status);
+    errorBanner.style.display = "none";
   } catch {
-    // handled in request
+    try {
+      const cached = JSON.parse(localStorage.getItem("admiral_last_status") || "null");
+      if (cached) {
+        renderStatus(cached);
+        unlockUi();
+        for (const button of appCard.querySelectorAll("button")) button.disabled = true;
+        const age = Math.round((Date.now() - Date.parse(cached.updatedAt)) / 60000);
+        errorBanner.textContent = `Offline — last known status from ${age} min ago. Controls are unavailable until reconnected.`;
+        errorBanner.style.display = "block";
+      }
+    } catch { /* no cached status */ }
   }
 }
 
@@ -365,6 +402,8 @@ function connectEvents() {
       const status = JSON.parse(event.data);
       unlockUi();
       renderStatus(status);
+      cacheStatus(status);
+      errorBanner.style.display = "none";
       // Reset reconnect delay on successful message
       sseReconnectDelay = 3000;
       // Refresh history to update the ticker. Debounced: the 10s poll
@@ -616,6 +655,17 @@ document.getElementById("loginForm").addEventListener("submit", async (event) =>
 document.getElementById("joinBtn").addEventListener("click", (e) =>
   void applyOverride("force_join", e.currentTarget)
 );
+
+document.getElementById("attendingBtn").addEventListener("click", async (e) => {
+  const active = !lastStatus?.heartbeat?.attendingUntil || confirm("You're marked as in class. OK to turn this off? Cancel to renew for 30 minutes.") === false;
+  const button = e.currentTarget;
+  setButtonBusy(button, true);
+  try {
+    await request("/attending", { method: "POST", body: JSON.stringify({ active }) });
+    await refreshStatus();
+  } catch (err) { showError(`Couldn't update attendance: ${err.message}`); }
+  finally { setButtonBusy(button, false); }
+});
 
 document.getElementById("leaveBtn").addEventListener("click", (e) => {
   if (!confirm("Force Admiral to leave the current room?")) return;

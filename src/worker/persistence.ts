@@ -168,6 +168,15 @@ function slotKeyFor(slot: ActiveSlot): string {
 export class WorkerPersistence {
   constructor(private readonly db: DatabaseSync) {}
 
+  getControlNumber(key: string): number {
+    const row = this.db.prepare("SELECT value_json FROM control_state WHERE key = ?").get(key) as { value_json: string } | undefined;
+    return Number(row?.value_json) || 0;
+  }
+
+  setControlNumber(key: string, value: number): void {
+    this.db.prepare("INSERT INTO control_state (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json").run(key, String(value));
+  }
+
   // ── Durable worker control state (singleton row) ──────────────────────────
 
   loadWorkerState(): PersistedWorkerState {
@@ -318,6 +327,24 @@ export class WorkerPersistence {
     const row = this.db
       .prepare("SELECT COUNT(*) AS n FROM events WHERE kind = ? AND ts_ms >= ?")
       .get(kind, sinceMs) as unknown as { n: number };
+    return row.n;
+  }
+
+  listEventsBetween(fromMs: number, toMs: number, limit = 2000): HistoryEvent[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM events WHERE ts_ms >= ? AND ts_ms < ? ORDER BY id ASC LIMIT ?"
+    ).all(fromMs, toMs, limit) as unknown as EventRow[];
+    return rows.map((row) => ({
+      id: row.id, tsMs: row.ts_ms, tsIso: new Date(row.ts_ms).toISOString(),
+      kind: row.kind, slotKey: row.slot_key, courseId: row.course_id,
+      className: row.class_name, payload: parsePayloadJson(row.payload_json)
+    }));
+  }
+
+  countEmailSuppressionsSince(sinceMs: number): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM events WHERE kind = 'email_suppressed' AND ts_ms >= ? AND json_extract(payload_json, '$.reason') != 'per-session cap reached'"
+    ).get(sinceMs) as unknown as { n: number };
     return row.n;
   }
 
