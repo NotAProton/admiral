@@ -29,8 +29,9 @@ keyword check for `"ok":true` and enable downtime AND recovery email alerts.
 
 Back up the database regularly: use SQLite's online backup API
 (`node:sqlite`'s `backup()`), then copy the result off the VPS and verify it
-opens. **Do not**
-copy the live `.db` file alone while WAL mode is in use. Keep backups separate
+opens. The VPS runs `~/backup-admiral.sh` from cron at 19:15 UTC each day;
+it keeps seven days locally, **not** off-host. Copy backups off the VPS
+regularly. **Do not** copy the live `.db` file alone while WAL mode is in use. Keep backups separate
 from the Docker volume. Monitor VPS disk free space (`df -h /`) and prune only
 unused Docker images when space runs low; do not prune volumes.
 
