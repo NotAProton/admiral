@@ -933,6 +933,17 @@ export class AdmiralEngine {
     }
     this.scrapeFailStreak = 0;
 
+    // Resolve an earlier empty-room alert as soon as a valid scrape shows the
+    // scheduled room populated, including during overtime or the entry grace.
+    if (snapshot.count >= AdmiralEngine.ROOM_MIN_PARTICIPANTS && this.currentRoomSlot && this.activeSlot &&
+        this.sessionKey(this.currentRoomSlot) === this.sessionKey(this.activeSlot)) {
+      const key = this.sessionKey(this.currentRoomSlot);
+      if (this.center.wasActionSent(key, "room_empty_everywhere") && !this.center.wasRecoverySent(key, "room_recovered")) {
+        this.persistence.appendEvent({ kind: "room_recovered", slot: this.currentRoomSlot, payload: { count: snapshot.count } });
+        this.center.enqueue({ kind: "room_recovered", slot: this.currentRoomSlot, payload: { count: snapshot.count } });
+      }
+    }
+
     // While holding the room in overtime, the overtime logic owns empty-room
     // detection (it exits on the same headcount signal but on a faster cadence).
     // Keep dead-scrape handling above (a truly-ended meeting must still leave),
@@ -960,12 +971,6 @@ export class AdmiralEngine {
         this.roomSweepPending = true;
       }
     } else {
-      if (this.belowThresholdSinceMs != null && this.currentRoomSlot) {
-        const key = this.sessionKey(this.currentRoomSlot);
-        if (this.center.wasActionSent(key, "room_empty_everywhere")) {
-          this.center.enqueue({ kind: "room_recovered", slot: this.currentRoomSlot, payload: { count: snapshot.count } });
-        }
-      }
       this.belowThresholdSinceMs = null;
     }
   }

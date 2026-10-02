@@ -184,6 +184,11 @@ export class NotificationCenter {
     return this.p.dedupeExists(key) || this.p.pendingOutboxExists(key);
   }
 
+  wasRecoverySent(slotKey: string, kind: "room_recovered" | "join_recovered"): boolean {
+    const key = `${kind}:${slotKey}`;
+    return this.p.dedupeExists(key) || this.p.pendingOutboxExists(key);
+  }
+
   /** True once a session summary for this slot has been sent or is pending. */
   wasSummarySent(slotKey: string): boolean {
     return (
@@ -878,9 +883,8 @@ function renderMorningPlan(status: StatusResponse, nowMs: number) {
     "",
     "Today's classes:"
   ];
-  const slots = status.schedule.todaySlots.map((s) => ({ time: `${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)}`, label: `${s.className} (${s.courseId})` }));
-  if (slots.length === 0) lines.push("  (none scheduled today)");
-  for (const s of slots) lines.push(`  • ${s.time}  ${s.label}`);
+  if (status.schedule.todaySlots.length === 0) lines.push("  (none scheduled today)");
+  for (const s of status.schedule.todaySlots) lines.push(`  • ${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)}  ${s.className} (${s.courseId})`);
   if (status.schedule.upcomingSlot) {
     const inMin = minutesFromNow(status.schedule.upcomingSlot.startedAt, nowMs);
     lines.push(
@@ -914,6 +918,7 @@ export function renderDailyWrapup(p: WorkerPersistence, status: StatusResponse, 
     const awayMs = own.filter((e) => e.kind === "room_sweep_return").reduce((n, e) => n + (typeof e.payload?.awayMs === "number" ? e.payload.awayMs : 0), 0);
     const overtime = own.some((e) => e.kind === "overtime_hold_start");
     const alerts = own.filter((e) => e.kind === "room_sweep_exhausted").length;
+    const recovered = own.some((e) => e.kind === "room_recovered");
     const start = Date.parse(s.startedAt), end = Date.parse(s.endsAt);
     const overtimeMs = overtime ? Math.max(0, (leaves.at(-1)?.tsMs ?? nowMs) - end) : 0;
     const handoffs = leaves.filter((e) => String(e.payload?.trigger ?? "").includes("Duplicate")).length;
@@ -925,7 +930,7 @@ export function renderDailyWrapup(p: WorkerPersistence, status: StatusResponse, 
       coveredMs += Math.max(0, Math.min(leave?.tsMs ?? nextSweep?.tsMs ?? nowMs, end) - Math.max(join.tsMs, start));
     }
     const duration = Math.max(1, Math.round((end - start) / 60_000));
-    lines.push(`  • ${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)} ${s.className}: Admiral in scheduled room ~${Math.round(coveredMs / 60_000)}/${duration} min${joins.length ? `; joined ${shortIstTime(joins[0]!.tsMs)}; last left ${leaves.length ? shortIstTime(leaves.at(-1)!.tsMs) : "still covering"}` : "; did not join"}${handoffs ? `; ${handoffs} handoff(s)` : ""}${overtime ? `; held ~${Math.round(overtimeMs / 60_000)} min overtime` : ""}${sweeps ? `; ${sweeps} sweeps (~${Math.round(awayMs / 60_000)} min away)` : ""}${failures ? `; ${failures} join failures` : ""}${alerts ? `; empty-room alerts: ${alerts}` : ""}.`);
+    lines.push(`  • ${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)} ${s.className}: Admiral in scheduled room ~${Math.round(coveredMs / 60_000)}/${duration} min${joins.length ? `; joined ${shortIstTime(joins[0]!.tsMs)}; last left ${leaves.length ? shortIstTime(leaves.at(-1)!.tsMs) : "still covering"}` : "; did not join"}${handoffs ? `; ${handoffs} handoff(s)` : ""}${overtime ? `; held ~${Math.round(overtimeMs / 60_000)} min overtime` : ""}${sweeps ? `; ${sweeps} sweeps (~${Math.round(awayMs / 60_000)} min away)` : ""}${alerts ? `; empty-room alert ${recovered ? "resolved" : "unresolved"}` : ""}${failures ? `; ${failures} join failures` : ""}.`);
   }
   if (status.schedule.upcomingSlot) {
     lines.push("", `Next class: ${status.schedule.upcomingSlot.className} at ${shortIstTime(status.schedule.upcomingSlot.startedAt)}`);
