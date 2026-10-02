@@ -600,6 +600,14 @@ export class WorkerPersistence {
     }));
   }
 
+  participantStatsForSlot(slotKey: string, fromMs: number, toMs: number): { min: number; max: number; median: number; samples: number } | null {
+    const rows = this.db.prepare(
+      "SELECT participant_count AS n FROM participant_samples WHERE slot_key = ? AND ts_ms >= ? AND ts_ms < ? ORDER BY participant_count"
+    ).all(slotKey, fromMs, toMs) as { n: number }[];
+    if (!rows.length) return null;
+    return { min: rows[0]!.n, max: rows.at(-1)!.n, median: rows[Math.floor(rows.length / 2)]!.n, samples: rows.length };
+  }
+
   // ── Date-scoped schedule overrides (day_overrides) ───────────────────────
 
   addDayOverride(input: {

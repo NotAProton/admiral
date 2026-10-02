@@ -264,8 +264,10 @@ test("wrap-up uses override-applied slots and reports coverage without claiming 
   status.schedule.todaySlots = [slot];
   p.appendEvent({ kind: "join_success", slot, tsMs: Date.parse("2026-07-29T10:02:00+05:30") });
   p.appendEvent({ kind: "leave_success", slot, tsMs: Date.parse("2026-07-29T10:57:00+05:30"), payload: { trigger: "Slot ended" } });
+  p.insertParticipantSample({ slotKey: `${slot.courseId}@${slot.startedAt}`, courseId: slot.courseId, className: slot.className, participantCount: 10, adopted: false, tsMs: Date.parse("2026-07-29T10:20:00+05:30") });
   const rendered = renderDailyWrapup(p, status, now);
   assert.match(rendered.lines.join("\n"), /~53\/55 min/);
+  assert.match(rendered.lines.join("\n"), /headcount median 10, max 10/);
   assert.match(rendered.lines.join("\n"), /not proof of attendance/);
   status.schedule.todaySlots = [];
   assert.match(renderDailyWrapup(p, status, now).lines.join("\n"), /none scheduled/);

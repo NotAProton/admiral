@@ -920,6 +920,7 @@ export function renderDailyWrapup(p: WorkerPersistence, status: StatusResponse, 
     const alerts = own.filter((e) => e.kind === "room_sweep_exhausted").length;
     const recovered = own.some((e) => e.kind === "room_recovered");
     const start = Date.parse(s.startedAt), end = Date.parse(s.endsAt);
+    const stats = p.participantStatsForSlot(key, start, Math.min(nowMs, end + 60 * 60_000));
     const overtimeMs = overtime ? Math.max(0, (leaves.at(-1)?.tsMs ?? nowMs) - end) : 0;
     const handoffs = leaves.filter((e) => String(e.payload?.trigger ?? "").includes("Duplicate")).length;
     let coveredMs = 0;
@@ -930,7 +931,7 @@ export function renderDailyWrapup(p: WorkerPersistence, status: StatusResponse, 
       coveredMs += Math.max(0, Math.min(leave?.tsMs ?? nextSweep?.tsMs ?? nowMs, end) - Math.max(join.tsMs, start));
     }
     const duration = Math.max(1, Math.round((end - start) / 60_000));
-    lines.push(`  • ${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)} ${s.className}: Admiral in scheduled room ~${Math.round(coveredMs / 60_000)}/${duration} min${joins.length ? `; joined ${shortIstTime(joins[0]!.tsMs)}; last left ${leaves.length ? shortIstTime(leaves.at(-1)!.tsMs) : "still covering"}` : "; did not join"}${handoffs ? `; ${handoffs} handoff(s)` : ""}${overtime ? `; held ~${Math.round(overtimeMs / 60_000)} min overtime` : ""}${sweeps ? `; ${sweeps} sweeps (~${Math.round(awayMs / 60_000)} min away)` : ""}${alerts ? `; empty-room alert ${recovered ? "resolved" : "unresolved"}` : ""}${failures ? `; ${failures} join failures` : ""}.`);
+    lines.push(`  • ${shortIstTime(s.startedAt)}–${shortIstTime(s.endsAt)} ${s.className}: Admiral in scheduled room ~${Math.round(coveredMs / 60_000)}/${duration} min${joins.length ? `; joined ${shortIstTime(joins[0]!.tsMs)}; last left ${leaves.length ? shortIstTime(leaves.at(-1)!.tsMs) : "still covering"}` : "; did not join"}${stats ? `; headcount median ${stats.median}, max ${stats.max} (${stats.samples} samples)` : ""}${handoffs ? `; ${handoffs} handoff(s)` : ""}${overtime ? `; held ~${Math.round(overtimeMs / 60_000)} min overtime` : ""}${sweeps ? `; ${sweeps} sweeps (~${Math.round(awayMs / 60_000)} min away)` : ""}${alerts ? `; empty-room alert ${recovered ? "resolved" : "unresolved"}` : ""}${failures ? `; ${failures} join failures` : ""}.`);
   }
   if (status.schedule.upcomingSlot) {
     lines.push("", `Next class: ${status.schedule.upcomingSlot.className} at ${shortIstTime(status.schedule.upcomingSlot.startedAt)}`);
